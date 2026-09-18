@@ -16,10 +16,11 @@ import { EventEngine, EVENT_TYPES, defaultEventConfig } from './events.js';
 import { draw, cellSizeOf, LEGEND } from './render.js';
 import { Editor, TOOL_HELP, TEMPLATES } from './editor.js';
 import { demoLayout } from './demo.js';
+import { LAYOUT_TEMPLATES } from './layouts.js';
 import * as store from './storage.js';
 import {
   renderTimetable, generateTimetable, generateTakt, emptyRow, GATTUNGEN,
-  gattungOf, checkTimetable, stopsToText
+  gattungOf, checkTimetable, stopsToText, relations
 } from './timetable.js';
 
 const $ = sel => document.querySelector(sel);
@@ -95,7 +96,7 @@ function loop(now) {
     if (now - lastPanel > 400) {
       lastPanel = now;
       updateTrainTable(); updateFaults(); updateScore(); updateMessages();
-      updateCrossingPanel(); updateQueuePanel(); updateRouteList();
+      updateCrossingPanel(); updateQueuePanel(); updateRouteList(); updateBoard();
     }
   } else if (app.view === 'editor') {
     draw($('#canvas-edit'), app.layout, null, {
@@ -187,7 +188,8 @@ function onSimClick(e) {
   if (pick.type === 'signal') dest = { type: 'signal', sig: pick.sig };
   else if (pick.type === 'entry') dest = { type: 'exit', cell: pick.cell };
   else if (app.shuntMode && pick.cell) dest = { type: 'cell', cell: pick.cell };
-  else return setStatus('Ziel muss ein Signal oder eine Ausfahrt sein.', true);
+  else if (pick.cell && pick.cell.ends.length === 1) dest = { type: 'cell', cell: pick.cell };  // Gleisende
+  else return setStatus('Ziel muss ein Signal, eine Ausfahrt oder ein Gleisende sein.', true);
 
   const opts = { substitute: e.shiftKey, shunt: app.shuntMode };
   // Zuglenkung: liegen Signale dazwischen, wird die ganze Kette gestellt
@@ -296,7 +298,10 @@ function onSimContext(e) {
       }
     });
     const tr = sim.trainAtCell(k);
-    if (tr) items.push({ label: `Zug ${tr.nr} verfolgen`, fn: () => { app.followTrain = tr.id; toast(`${tr.nr} wird verfolgt.`); } });
+    if (tr) {
+      items.push({ label: `Zug ${tr.nr}: Einzelheiten`, fn: () => trainDetails(tr) });
+      items.push({ label: `Zug ${tr.nr} verfolgen`, fn: () => { app.followTrain = tr.id; toast(`${tr.nr} wird verfolgt.`); } });
+    }
     if (sim.blockedCells.has(k)) items.push({ label: 'Gleissperrung aufheben', fn: () => { sim.blockedCells.delete(k); logMsg(`Sperrung ${k} aufgehoben.`, 'warn'); } });
     else items.push({ label: 'Gleis sperren', fn: () => { sim.blockedCells.add(k); logMsg(`Gleis ${k} gesperrt.`, 'warn'); } });
   }
@@ -331,6 +336,150 @@ function setStatus(html, warn = false) {
   el.style.color = warn ? 'var(--warn)' : '';
 }
 
+/* ---------------------- Befehlszeile ---------------------- */
+/** Bezeichnung in einen Fahrstraßenpunkt auflösen (Signal, Ein-/Ausfahrt, Bahnsteig) */
+function resolvePoint(text, asDest) {
+  const L = app.layout;
+  const t = text.trim().toLowerCase();
+  if (!t) return null;
+  for (const id in L.signals) {
+    const sg = L.signals[id];
+    if (sg.name.toLowerCase() === t) return { type: 'signal', sig: sg };
+  }
+  for (const e of entries(L)) {
+    if (e.name.toLowerCase() === t) return { type: asDest ? 'exit' : 'entry', cell: e.cell };
+  }
+  // Bahnsteig: Zielpunkt ist das Gleisende oder das Ausfahrsignal dieses Gleises
+  for (const pf of platforms(L)) {
+    if (pf.toLowerCase() !== t) continue;
+    const cells = Object.values(L.cells).filter(c => c.platform === pf);
+    const stumpf = cells.find(c => c.ends.length === 1);
+    if (stumpf) return { type: 'cell', cell: stumpf };
+    for (const c of cells) {
+      const sg = signalsOfCell(L, c.x, c.y)[0];
+      if (sg) return { type: 'signal', sig: sg };
+    }
+  }
+  return null;
+}
+
+function runCommand() {
+  const raw = $('#cmd').value.trim();
+  if (!raw) return;
+  const parts = raw.split(/[\s,>→-]+/).filter(Boolean);
+  if (parts.length < 2) { setStatus('Bitte Start und Ziel angeben, z. B. „A N1".', true); return; }
+  const start = resolvePoint(parts[0], false);
+  const dest = resolvePoint(parts.slice(1).join(' '), true);
+  if (!start) return setStatus(`„${escapeHtml(parts[0])}" ist kein bekanntes Signal und keine Einfahrt.`, true);
+  if (!dest) return setStatus(`„${escapeHtml(parts.slice(1).join(' '))}" ist kein bekanntes Ziel.`, true);
+  const res = lockRouteChain(app.sim, start, dest, { shunt: app.shuntMode });
+  if (res.routes.length) {
+    app.sim.stats.routesSet += res.routes.length;
+    const kette = res.routes.map(r => r.destName).join(' → ');
+    logMsg(`Befehl „${raw}": ${res.routes.length} Fahrstraße(n) ${pointLabel(start)} → ${kette}.`, 'ok');
+    setStatus(`${res.routes.length} von ${res.gesamt} Teilfahrstraßen gestellt: ${escapeHtml(pointLabel(start))} → ${escapeHtml(kette)}.` +
+      (res.ok ? '' : ` <span style="color:var(--warn)">${escapeHtml(res.reason)}</span>`));
+    $('#cmd').value = '';
+  } else {
+    setStatus(res.reason || 'Fahrstraße nicht möglich.', true);
+  }
+}
+
+/* ---------------------- Zugdetails ---------------------- */
+function trainDetails(tr) {
+  openModal(`Zug ${tr.nr} (${tr.gattung})`, body => {
+    const wrap = document.createElement('div');
+    wrap.className = 'traindetail';
+    const g = gattungOf(tr.gattung);
+    const sig = app.sim.signalAtAuthorityEnd(tr);
+    const rest = tr.steps.length ? Math.max(0, tr.steps.length * CELL_M - tr.s) : 0;
+    wrap.innerHTML = `
+      <div class="settings-grid">
+        <span>Lauf</span><b>${escapeHtml(tr.entryName)} → ${escapeHtml(tr.exitName)}</b>
+        <span>Zustand</span><b>${stateName(tr)}</b>
+        <span>Geschwindigkeit</span><b>${Math.round(tr.v * 3.6)} km/h (zulässig ${Math.round(app.sim.speedLimitFor(tr))} km/h)</b>
+        <span>Höchstgeschwindigkeit</span><b>${tr.vmax} km/h${tr.vmaxFault ? ` – gestört, nur ${tr.vmaxFault} km/h` : ''}</b>
+        <span>Zuglänge</span><b>${tr.lenM} m</b>
+        <span>Beschleunigung / Bremsen</span><b>${(tr.accel || g.accel || 0.7).toFixed(2)} / ${(tr.brake || g.brake || 0.9).toFixed(2)} m/s²</b>
+        <span>Verspätung</span><b>${signedMin(tr.delay)}</b>
+        <span>Fahrerlaubnis</span><b>${tr.steps.length ? Math.round(rest) + ' m bis ' + (sig ? sig.name : 'Fahrwegende') : 'keine'}</b>
+        <span>Wende</span><b>${tr.turn ? `${tr.turn.nr} nach ${tr.turn.exit} ab ${hhmm(tr.turn.dep)}` : (tr.record.turnedAt ? 'bereits gewendet' : '–')}</b>
+      </div>`;
+    const tab = document.createElement('table');
+    tab.innerHTML = '<thead><tr><th>Halt</th><th>an (Plan/Ist)</th><th>ab (Plan/Ist)</th><th>Anschluss</th></tr></thead>';
+    const tb = document.createElement('tbody');
+    tr.stops.forEach((st, i) => {
+      const rec = tr.record.stops[i];
+      const row = document.createElement('tr');
+      if (i === tr.nextStop) row.className = 'sel';
+      row.innerHTML = `<td>${escapeHtml(st.platform)}</td>
+        <td>${hhmm(st.arr)} / ${rec && rec.actualArr ? hhmm(rec.actualArr) : '—'}</td>
+        <td>${hhmm(st.dep)} / ${rec && rec.actualDep ? hhmm(rec.actualDep) : '—'}</td>
+        <td>${(st.connections || []).map(c => escapeHtml(c.from)).join(', ') || '–'}</td>`;
+      tb.append(row);
+    });
+    tab.append(tb);
+    wrap.append(tab);
+
+    const acts = document.createElement('div');
+    acts.className = 'row';
+    acts.style.marginTop = '8px';
+    const follow = document.createElement('button');
+    follow.textContent = app.followTrain === tr.id ? 'Verfolgung beenden' : 'Zug verfolgen';
+    follow.onclick = () => { app.followTrain = app.followTrain === tr.id ? null : tr.id; $('#modal').classList.add('hidden'); };
+    const zs1 = document.createElement('button');
+    zs1.textContent = 'Ersatzsignal anfordern';
+    zs1.disabled = !tr.waitSignal;
+    zs1.onclick = () => {
+      const m = app.sim.addMessage(`Ersatzsignal für ${tr.nr} an ${tr.waitSignal.name}.`, { from: 'Fdl' });
+      m.data = { signalId: tr.waitSignal.id, trainId: tr.id };
+      app.sim.answerMessage(m.id, 'zs1');
+      $('#modal').classList.add('hidden');
+    };
+    const streich = document.createElement('button');
+    streich.textContent = 'Zug streichen';
+    streich.className = 'danger';
+    streich.onclick = () => {
+      if (!window.confirm(`${tr.nr} wirklich ausfallen lassen?`)) return;
+      if (['run', 'hold', 'dwell'].includes(tr.state)) app.sim.finishTrain(tr);
+      else { tr.state = 'done'; tr.record.cancelled = true; }
+      app.sim.stats.cancelled++;
+      logMsg(`${tr.nr} wurde gestrichen.`, 'warn');
+      $('#modal').classList.add('hidden');
+    };
+    acts.append(follow, zs1, streich);
+    wrap.append(acts);
+    body.append(wrap);
+    return null;
+  });
+}
+
+/* ---------------------- Abfahrtstafel ---------------------- */
+function updateBoard() {
+  const sel = $('#board-platform');
+  const pfs = platforms(app.layout);
+  if (sel.options.length !== pfs.length) {
+    sel.innerHTML = pfs.map(p => `<option>${escapeHtml(p)}</option>`).join('');
+  }
+  const pf = sel.value || pfs[0];
+  const box = $('#board');
+  if (!pf) { box.innerHTML = '<em>keine Bahnsteige</em>'; return; }
+  const rows = [];
+  for (const tr of app.sim.trains) {
+    if (tr.state === 'done') continue;
+    tr.stops.forEach((st, i) => {
+      if (st.platform !== pf || i < tr.nextStop) return;
+      rows.push({ nr: tr.nr, gattung: tr.gattung, dep: st.dep, delay: tr.delay, ziel: tr.exitName, state: tr.state });
+    });
+  }
+  rows.sort((a, b) => a.dep - b.dep);
+  box.innerHTML = rows.slice(0, 8).map(r =>
+    `<div class="row2"><span>${hhmm(r.dep)}</span><span class="nr">${escapeHtml(r.nr)}</span>` +
+    `<span>${escapeHtml(r.ziel)}</span>` +
+    `<span class="${r.delay > 180 ? 'late' : ''}">${r.delay > 60 ? '+' + Math.round(r.delay / 60) : ''}</span></div>`
+  ).join('') || '<em>keine Abfahrten</em>';
+}
+
 /* ============================ Panels ============================ */
 function updateTrainTable() {
   const tb = $('#train-table tbody');
@@ -361,7 +510,7 @@ function updateTrainTable() {
       <td>${escapeHtml(t.entryName)}→${escapeHtml(t.exitName)}</td>
       <td>${escapeHtml(ziel)}</td>
       <td class="${cls}">${t.state === 'pending' ? '–' : signedMin(dl)}</td>`;
-    tr.onclick = () => { app.followTrain = t.id; scrollToTrain(t); };
+    tr.onclick = () => { scrollToTrain(t); trainDetails(t); };
     tb.append(tr);
   }
 }
@@ -877,6 +1026,113 @@ function drawOccupancy() {
   }
 }
 
+/* ============================ Bildfahrplan ============================ */
+function graphRoutes() {
+  return relations(app.layout).filter(r => r.kind === 'durchfahrt');
+}
+
+function drawGraphTimetable() {
+  const sel = $('#gr-route');
+  const rels = graphRoutes();
+  if (sel.options.length !== rels.length) {
+    sel.innerHTML = rels.map((r, i) => `<option value="${i}">${escapeHtml(r.from)} → ${escapeHtml(r.to)}</option>`).join('');
+  }
+  const cv = $('#graph-canvas');
+  const ctx = cv.getContext('2d');
+  const W = cv.clientWidth || 1000, H = 420;
+  cv.width = W; cv.height = H;
+  ctx.fillStyle = '#0a0e14'; ctx.fillRect(0, 0, W, H);
+  if (!rels.length) {
+    ctx.fillStyle = '#8b98a8'; ctx.font = '13px Segoe UI'; ctx.textAlign = 'center';
+    ctx.fillText('Für einen Bildfahrplan werden zwei verbundene Ein-/Ausfahrten benötigt.', W / 2, H / 2);
+    return;
+  }
+  const rel = rels[Math.min(rels.length - 1, +sel.value || 0)];
+  const L = app.layout;
+  const a = entries(L).find(e => e.name === rel.from);
+  const b = entries(L).find(e => e.name === rel.to);
+  const path = findRoute({ type: 'entry', cell: a.cell }, { type: 'exit', cell: b.cell }, {
+    layout: L, blocked: new Set(), locked: new Map(), holds: new Map(),
+    occupied: new Set(), allowOccupied: true, mode: 'train', passSignals: true
+  });
+  if (!path) { ctx.fillStyle = '#8b98a8'; ctx.fillText('Kein durchgehender Weg gefunden.', 20, 30); return; }
+  const pos = new Map();
+  path.steps.forEach((st, i) => { if (!pos.has(st.k)) pos.set(st.k, i); });
+  const maxIdx = path.steps.length - 1;
+
+  const from = parseTime($('#gr-from').value) ?? app.layout.startTime;
+  const to = parseTime($('#gr-to').value) ?? from + 4 * 3600;
+  const left = 110, right = W - 16, top = 22, bottom = H - 26;
+  const xOf = t => left + (right - left) * (t - from) / Math.max(1, to - from);
+  const yOf = i => top + (bottom - top) * i / Math.max(1, maxIdx);
+
+  // Raster und Betriebsstellen
+  ctx.strokeStyle = '#1b222d'; ctx.fillStyle = '#8b98a8'; ctx.font = '11px Segoe UI';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  for (let t = Math.ceil(from / 1800) * 1800; t <= to; t += 1800) {
+    ctx.beginPath(); ctx.moveTo(xOf(t), top); ctx.lineTo(xOf(t), bottom); ctx.stroke();
+    ctx.fillText(hhmm(t), xOf(t), 10);
+  }
+  ctx.textAlign = 'left';
+  const marken = [{ i: 0, name: rel.from }];
+  const gesehen = new Set();
+  path.steps.forEach((st, i) => {
+    const p = parseKey(st.k);
+    const c = cellAt(L, p.x, p.y);
+    if (c && c.platform && !gesehen.has(c.platform)) { gesehen.add(c.platform); marken.push({ i, name: c.platform }); }
+  });
+  marken.push({ i: maxIdx, name: rel.to });
+  ctx.strokeStyle = '#2b3543';
+  for (const m of marken) {
+    ctx.beginPath(); ctx.moveTo(left, yOf(m.i)); ctx.lineTo(right, yOf(m.i)); ctx.stroke();
+    ctx.fillStyle = '#c3cedb';
+    ctx.fillText(m.name, 6, yOf(m.i));
+  }
+
+  // Fahrplanlinien (gestrichelt)
+  ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+  for (const row of app.layout.timetable) {
+    if (row.entry !== rel.from || row.exit !== rel.to) continue;
+    const pts = [[row.entryTime, 0]];
+    for (const st of row.stops) {
+      const cells = Object.values(L.cells).filter(c => c.platform === st.platform && pos.has(key(c.x, c.y)));
+      if (!cells.length) continue;
+      const i = Math.min(...cells.map(c => pos.get(key(c.x, c.y))));
+      pts.push([st.arr, i], [st.dep, i]);
+    }
+    const letzte = pts[pts.length - 1];
+    const fahrzeit = Math.max(120, (letzte[0] - row.entryTime) * (maxIdx - letzte[1]) / Math.max(1, letzte[1]));
+    pts.push([letzte[0] + fahrzeit, maxIdx]);
+    ctx.strokeStyle = 'rgba(139,152,168,.7)';
+    ctx.beginPath();
+    pts.forEach(([t, i], n) => n ? ctx.lineTo(xOf(t), yOf(i)) : ctx.moveTo(xOf(t), yOf(i)));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // tatsächliche Fahrten
+  ctx.lineWidth = 2;
+  for (const tr of app.sim.trains) {
+    const log = (tr.trackLog || []).filter(p => pos.has(p.k) && p.t >= from && p.t <= to);
+    if (log.length < 2) continue;
+    ctx.strokeStyle = tr.delay > 300 ? '#f85149' : tr.delay > 60 ? '#e3b341' : '#3fb950';
+    ctx.beginPath();
+    log.forEach((p, n) => {
+      const x = xOf(p.t), y = yOf(pos.get(p.k));
+      n ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+    const last = log[log.length - 1];
+    ctx.fillStyle = '#c3cedb'; ctx.font = '10px Segoe UI'; ctx.textAlign = 'left';
+    ctx.fillText(tr.nr, xOf(last.t) + 3, yOf(pos.get(last.k)) - 5);
+  }
+  // Jetzt-Linie
+  if (app.sim.time >= from && app.sim.time <= to) {
+    ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(xOf(app.sim.time), top); ctx.lineTo(xOf(app.sim.time), bottom); ctx.stroke();
+  }
+}
+
 /* ============================ Auswertung ============================ */
 function buildReport() {
   const rep = app.sim.report();
@@ -947,6 +1203,8 @@ function reportCsv() {
 
 /* ============================ Einstellungen ============================ */
 const SETTING_FIELDS = [
+  ['metersPerCell', 'Streckenmaßstab: Meter je Rasterzelle', 'num'],
+  ['dynamicFactor', 'Fahrdynamik-Faktor (1 = realistisch)', 'num'],
   ['flankProtection', 'Flankenschutz fordern', 'bool'],
   ['overlapM', 'Durchrutschweg (m)', 'num'],
   ['overlapReleaseSec', 'Auflösung Durchrutschweg nach (s)', 'num'],
@@ -964,6 +1222,12 @@ const SETTING_FIELDS = [
   ['showZN', 'Zugnummern im Gleisbild anzeigen', 'bool']
 ];
 
+const DYNAMIC_PRESETS = {
+  'Vorbildgetreu': { metersPerCell: 100, dynamicFactor: 1, switchTime: 6, crossingCloseSec: 25 },
+  'Zügig': { metersPerCell: 50, dynamicFactor: 1.2, switchTime: 5, crossingCloseSec: 18 },
+  'Sehr zügig': { metersPerCell: 25, dynamicFactor: 1.6, switchTime: 3, crossingCloseSec: 10 }
+};
+
 function buildSettings() {
   const box = $('#settings-form');
   const st = app.layout.settings;
@@ -976,14 +1240,32 @@ function buildSettings() {
     else {
       inp.type = 'number';
       inp.value = st[key_] ?? 0;
-      if (key_ === 'accel' || key_ === 'brake') inp.step = '0.1';
+      if (['accel', 'brake', 'dynamicFactor'].includes(key_)) inp.step = '0.1';
     }
     inp.onchange = () => {
       st[key_] = type === 'bool' ? inp.checked : (parseFloat(inp.value) || 0);
       app.dirty = type === 'bool' ? app.dirty : true;
+      if (key_ === 'metersPerCell') toast('Maßstab geändert – wirkt nach „Betrieb zurücksetzen".');
     };
     box.append(lab, inp);
   }
+  // Voreinstellungen für die Fahrdynamik
+  const presets = document.createElement('div');
+  presets.className = 'row';
+  presets.style.gridColumn = '1 / -1';
+  for (const [name, vals] of Object.entries(DYNAMIC_PRESETS)) {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => {
+      Object.assign(st, vals);
+      buildSettings();
+      newSim();
+      $('#btn-play').textContent = '▶';
+      toast(`Fahrdynamik „${name}" übernommen.`);
+    };
+    presets.append(b);
+  }
+  box.append(presets);
   refreshSaveList();
 }
 
@@ -1059,6 +1341,8 @@ function showHelp() {
         <span class="kbd">+ / −</span><span>Gleisbild vergrößern/verkleinern</span>
         <span class="kbd">Esc</span><span>Auswahl abbrechen, Menüs schließen</span>
         <span class="kbd">Strg+Z / Strg+Y</span><span>Editor: rückgängig / wiederholen</span>
+        <span class="kbd">Befehlszeile</span><span>„A N1" oder „West Ost" eingeben und Enter – stellt die Fahrstraßenkette</span>
+        <span class="kbd">Klick auf Zug</span><span>Einzelheiten: Fahrplan, Ist-Zeiten, Bremswerte, verfolgen, Ersatzsignal, streichen</span>
         <span class="kbd">F1</span><span>diese Hilfe</span>
       </div>
       <p class="small">Signalbegriffe: Hp0 Halt · Hp1 Fahrt · Hp2 Langsamfahrt (abzweigende Weiche) ·
@@ -1066,6 +1350,9 @@ function showHelp() {
       Eine Fahrstraße zeigt erst Fahrt, wenn alle Weichen in Endlage liegen, der Flankenschutz steht,
       der Durchrutschweg frei ist und die Bahnübergänge geschlossen sind. Das Feld
       „Fahrstraße" zeigt zu jeder eingestellten Fahrstraße, worauf sie noch wartet.</p>
+      <p class="small"><b>Ansichten:</b> Bildfahrplan (Zeit-Weg-Linien je Strecke), Gleisbelegung
+      (Plan gegen Ist je Bahnsteig), Auswertung (Verspätungen je Zug) und Einstellungen
+      (Streckenmaßstab, Fahrdynamik, Sicherungstechnik).</p>
       <p class="small"><b>Damit Züge nicht unnötig bremsen:</b> Fahrstraßen im Voraus stellen –
       der Durchrutschweg der vorherigen Fahrstraße wird dabei automatisch überlagert.
       Ein Zug, der erst am Einfahrsignal eine Weiterfahrt bekommt, verliert durch Bremsen und
@@ -1127,14 +1414,10 @@ function buildUI() {
   });
 
   $('#btn-help').onclick = showHelp;
-  $('#btn-new').onclick = () => {
-    const name = window.prompt('Name des neuen Stellwerks:', 'Mein Stellwerk');
-    if (!name) return;
-    app.layout = newLayout(name);
-    app.layout.events = defaultEventConfig();
-    newSim(); syncEditorFields(); refreshTimetable(); buildEventsView(); buildSettings(); refreshLayoutList();
-    switchView('editor');
-  };
+  $('#btn-cmd').onclick = runCommand;
+  $('#cmd').onkeydown = e => { if (e.key === 'Enter') runCommand(); };
+  $('#board-platform').onchange = updateBoard;
+  $('#btn-new').onclick = () => newFromTemplate();
   $('#btn-save').onclick = () => {
     store.save(app.layout); store.setLastName(app.layout.name);
     refreshLayoutList();
@@ -1181,6 +1464,8 @@ function buildUI() {
   };
 
   $('#btn-occ-refresh').onclick = drawOccupancy;
+  $('#btn-gr-refresh').onclick = drawGraphTimetable;
+  $('#gr-route').onchange = drawGraphTimetable;
   $('#btn-report-refresh').onclick = buildReport;
   $('#btn-report-csv').onclick = reportCsv;
   $('#btn-savegame').onclick = saveGame;
@@ -1204,6 +1489,38 @@ function zoom(factor, isSim) {
   }
 }
 
+/** Neues Stellwerk aus einer Vorlage */
+function newFromTemplate() {
+  openModal('Neues Stellwerk', body => {
+    const f = document.createElement('div');
+    f.className = 'settings-grid';
+    f.innerHTML = `
+      <label>Vorlage</label>
+      <select id="nl-tpl">${Object.keys(LAYOUT_TEMPLATES).map(n => `<option>${escapeHtml(n)}</option>`).join('')}</select>
+      <label>Name</label><input id="nl-name" type="text" value="Mein Stellwerk">`;
+    body.append(f);
+    const hint = document.createElement('p');
+    hint.className = 'small';
+    hint.textContent = 'Die Vorlagen bringen Gleisplan, Signale und einen passenden Fahrplan mit. ' +
+      'Das leere Stellwerk startet mit einem leeren Raster.';
+    body.append(hint);
+    setTimeout(() => {
+      const sel = $('#nl-tpl');
+      sel.onchange = () => { $('#nl-name').value = LAYOUT_TEMPLATES[sel.value]().name; };
+    });
+    return () => {
+      const tpl = $('#nl-tpl').value;
+      app.layout = LAYOUT_TEMPLATES[tpl]();
+      const nm = $('#nl-name').value.trim();
+      if (nm) app.layout.name = nm;
+      if (!app.layout.events) app.layout.events = defaultEventConfig();
+      newSim(); syncEditorFields(); refreshTimetable(); buildEventsView(); buildSettings(); refreshLayoutList();
+      switchView(app.layout.timetable.length ? 'sim' : 'editor');
+      toast(`„${app.layout.name}" angelegt.`);
+    };
+  });
+}
+
 function switchView(view) {
   if (view === 'sim' && app.dirty) { newSim(); app.dirty = false; $('#btn-play').textContent = '▶'; }
   app.view = view;
@@ -1214,6 +1531,7 @@ function switchView(view) {
   if (view === 'events') buildEventsView();
   if (view === 'editor') syncEditorFields();
   if (view === 'occupancy') drawOccupancy();
+  if (view === 'graph') drawGraphTimetable();
   if (view === 'report') buildReport();
   if (view === 'settings') buildSettings();
 }

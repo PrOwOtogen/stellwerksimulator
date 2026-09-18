@@ -89,3 +89,10 @@ td input{width:100%;min-width:60px}
 .route-list .r .why{color:var(--warn)}
 .route-list .r .ok{color:var(--ok)}
 .route-list .r button{padding:1px 6px}
+
+.board{margin-top:6px;font-size:11px}
+.board .row2{display:grid;grid-template-columns:auto 1fr auto auto;gap:4px 8px;padding:2px 0;border-bottom:1px solid #222a35;align-items:baseline}
+.board .nr{color:var(--accent);font-weight:600}
+.board .late{color:var(--warn)}
+#graph-canvas{width:100%;background:#0a0e14;border:1px solid var(--line);border-radius:6px;margin-top:8px}
+.traindetail table{margin-top:6px}

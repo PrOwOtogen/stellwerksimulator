@@ -117,10 +117,10 @@ export function demoLayout() {
 
   /* --- Fahrplan: Takt-Linien plus Zufallsverkehr --- */
   const takt = [
-    ...generateTakt(L, { gattung: 'RE', from: 'West', to: 'Ost', platform: 'Gleis 1', firstDep: 6 * 3600 + 180, everyMin: 60, count: 5, nrStart: 4010, travelSec: 300 }),
-    ...generateTakt(L, { gattung: 'RE', from: 'Ost', to: 'West', platform: 'Gleis 2', firstDep: 6 * 3600 + 900, everyMin: 60, count: 5, nrStart: 4011, travelSec: 300 }),
-    ...generateTakt(L, { gattung: 'RB', from: 'Nord', to: 'Süd', platform: 'Gleis 3', firstDep: 6 * 3600 + 600, everyMin: 60, count: 4, nrStart: 8010, travelSec: 360 }),
-    ...generateTakt(L, { gattung: 'S', from: 'West', to: 'Ost', platform: 'Gleis 4', firstDep: 6 * 3600 + 1500, everyMin: 30, count: 6, nrStart: 2010, travelSec: 300 })
+    ...generateTakt(L, { gattung: 'RE', from: 'West', to: 'Ost', platform: 'Gleis 1', firstDep: 6 * 3600 + 180, everyMin: 60, count: 5, nrStart: 4010, travelSec: 210 }),
+    ...generateTakt(L, { gattung: 'RE', from: 'Ost', to: 'West', platform: 'Gleis 2', firstDep: 6 * 3600 + 900, everyMin: 60, count: 5, nrStart: 4011, travelSec: 210 }),
+    ...generateTakt(L, { gattung: 'RB', from: 'Nord', to: 'Süd', platform: 'Gleis 3', firstDep: 6 * 3600 + 600, everyMin: 60, count: 4, nrStart: 8010, travelSec: 240 }),
+    ...generateTakt(L, { gattung: 'S', from: 'West', to: 'Ost', platform: 'Gleis 4', firstDep: 6 * 3600 + 1500, everyMin: 30, count: 6, nrStart: 2010, travelSec: 210 })
   ];
   const zufall = generateTimetable(L, 8, 6 * 3600 + 1800, 4711, { spreadSec: 900 });
   L.timetable = [...takt, ...zufall].sort((a, b) => a.entryTime - b.entryTime);

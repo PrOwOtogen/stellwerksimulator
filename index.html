@@ -14,6 +14,7 @@
     <button class="tab" data-view="editor">Stellwerk-Editor</button>
     <button class="tab" data-view="timetable">Fahrplan</button>
     <button class="tab" data-view="events">Ereignisse</button>
+    <button class="tab" data-view="graph">Bildfahrplan</button>
     <button class="tab" data-view="occupancy">Gleisbelegung</button>
     <button class="tab" data-view="report">Auswertung</button>
     <button class="tab" data-view="settings">Einstellungen</button>
@@ -60,6 +61,10 @@
         <h2>Fahrstraße</h2>
         <div id="route-status" class="status">Startsignal oder Einfahrt anklicken.</div>
         <div class="row">
+          <input type="text" id="cmd" placeholder="Befehl: „A N1" oder „West Ost"" style="flex:1" title="Fahrstraße über die Tastatur: Start- und Zielbezeichnung eingeben">
+          <button id="btn-cmd">Stellen</button>
+        </div>
+        <div class="row">
           <button id="btn-route-cancel">Abbrechen (Esc)</button>
           <label class="check"><input type="checkbox" id="shunt-mode"> Rangierfahrstraße (R)</label>
         </div>
@@ -87,6 +92,11 @@
         <table id="train-table"><thead>
           <tr><th>Zug</th><th>Von→Nach</th><th>Ziel/Halt</th><th>Versp.</th></tr>
         </thead><tbody></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Abfahrtstafel</h2>
+        <select id="board-platform"></select>
+        <div id="board" class="board"></div>
       </div>
       <div class="panel">
         <h2>Bahnübergänge</h2>
@@ -210,6 +220,25 @@
         <table id="ev-table"><thead>
           <tr><th>aktiv</th><th>Ereignis</th><th>Gewicht</th><th>Beschreibung</th><th></th></tr>
         </thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= BILDFAHRPLAN ======================= -->
+  <section id="view-graph" class="view">
+    <div class="wide-pane">
+      <div class="panel">
+        <h2>Bildfahrplan (Zeit-Weg-Linien)</h2>
+        <div class="row">
+          <label>Von <input id="gr-from" type="text" value="06:00" style="width:5em"></label>
+          <label>Bis <input id="gr-to" type="text" value="08:00" style="width:5em"></label>
+          <label>Strecke
+            <select id="gr-route"></select>
+          </label>
+          <button id="btn-gr-refresh">Aktualisieren</button>
+          <span class="small">Durchgezogen = tatsächliche Fahrt, gestrichelt = Fahrplan.</span>
+        </div>
+        <canvas id="graph-canvas"></canvas>
       </div>
     </div>
   </section>

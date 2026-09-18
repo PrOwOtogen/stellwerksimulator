@@ -10,11 +10,13 @@ import {
   platformCells, neighbor, opp, crossings, switches as allSwitches
 } from './model.js';
 import {
-  lockRoute, releaseRoute, releaseOverlap, findRoute, reachAfterStep,
+  lockRoute, lockRouteChain, releaseRoute, releaseOverlap, findRoute, reachAfterStep,
   routeReady, aspectOf, aspectSpeed, nextMainSignal, pathToSignal, resetRouteCounter
 } from './interlocking.js';
 
-export const CELL_M = 100;        // eine Rasterzelle entspricht 100 m
+/** Länge einer Rasterzelle in Metern (über die Einstellungen änderbar) */
+export let CELL_M = 100;
+export function setCellMeters(m) { CELL_M = Math.max(10, m || 100); }
 const ACCEL_DEFAULT = 0.7;        // m/s²
 const BRAKE_DEFAULT = 0.9;        // m/s²
 
@@ -48,6 +50,7 @@ export class Sim {
 
   reset() {
     const L = this.layout;
+    setCellMeters(L.settings?.metersPerCell ?? 100);
     resetRouteCounter();
     this.time = L.startTime ?? 6 * 3600;
     this.running = false;
@@ -429,8 +432,9 @@ export class Sim {
     const obstacle = this.obstaclePos(tr);
     if (obstacle !== null && obstacle < stopAt) stopAt = obstacle;
 
-    const ACCEL = this.cfg.accel || ACCEL_DEFAULT;
-    const BRAKE = this.cfg.brake || BRAKE_DEFAULT;
+    const dyn = this.cfg.dynamicFactor || 1;
+    const ACCEL = (tr.accel || this.cfg.accel || ACCEL_DEFAULT) * dyn;
+    const BRAKE = (tr.brake || this.cfg.brake || BRAKE_DEFAULT) * dyn;
     const dRest = stopAt - tr.s;
     const vLimit = this.speedLimitFor(tr);
     let vTarget = vLimit / 3.6;
@@ -444,6 +448,16 @@ export class Sim {
     if (tr.v < 0.15) tr.v = 0;
     tr.vMaxSeen = Math.max(tr.vMaxSeen || 0, tr.v * 3.6);
 
+    // Positionsaufzeichnung für den Bildfahrplan
+    if (this.time - (tr.lastSample || 0) >= 15) {
+      tr.lastSample = this.time;
+      const idx = Math.min(tr.steps.length - 1, Math.max(0, Math.floor(tr.s / CELL_M)));
+      if (tr.steps[idx]) {
+        (tr.trackLog || (tr.trackLog = [])).push({ t: this.time, k: tr.steps[idx].k });
+        if (tr.trackLog.length > 500) tr.trackLog.shift();
+      }
+    }
+
     const before = tr.s;
     tr.s = Math.min(stopAt, tr.s + tr.v * dt);
     if (stopAt !== Infinity && stopAt - tr.s < 0.4) { tr.s = stopAt; tr.v = 0; }
@@ -451,7 +465,8 @@ export class Sim {
 
     if (ps !== null && tr.s >= ps - 0.6 && tr.v === 0) this.arriveAtStop(tr);
 
-    if (tr.v === 0 && !tr.exiting && tr.s >= authorityEnd - 0.5) {
+    // Ein planmäßiger Halt darf nicht als „steht vor Signal" überschrieben werden
+    if (tr.state !== 'dwell' && tr.v === 0 && !tr.exiting && tr.s >= authorityEnd - 0.5) {
       if (tr.state !== 'hold') {
         tr.state = 'hold';
         tr.holdSince = this.time;
@@ -722,12 +737,22 @@ export class Sim {
     }
     const sig = this.signalAtAuthorityEnd(tr);
     const free = this.routes.filter(r => !r.trainId && r.signal);
+    /** Fahrstraßen, die für einen anderen Zug gestellt wurden, bleiben diesem vorbehalten */
+    const passend = r => {
+      if (!r.forTrainId || r.forTrainId === tr.id) return true;
+      const andere = this.trains.find(t => t.id === r.forTrainId);
+      return !andere || andere.state === 'done';
+    };
     let route = null, prefix = null;
-    if (sig) route = free.find(r => r.signal.id === sig.id);
+    if (sig) {
+      const cands = free.filter(r => r.signal.id === sig.id);
+      route = cands.find(r => r.forTrainId === tr.id) || cands.find(passend);
+    }
     if (!route && tr.v === 0) {
       // Zug steht nicht unmittelbar am Signal (z. B. nach dem Wenden):
       // Weg bis zum Signal voraus prüfen und anhängen
       for (const r of free) {
+        if (!passend(r)) continue;
         const last = tr.steps[tr.steps.length - 1];
         if (!last) continue;
         const p = parseKey(last.k);
@@ -791,13 +816,17 @@ export class Sim {
         continue;
       }
       tr.noRouteSince = null; tr.noRouteWarned = false;
-      const res = lockRoute(this, start, dest, { substitute: true, forTrain: tr.id });
-      if (res.ok) {
-        res.route.forTrainId = tr.id;
-        tr.lastRouteError = null;
-        this.stats.routesSet++;
-        this.log(`Automatik: ${res.route.id} für ${tr.nr} bis ${res.route.destName} gestellt.`);
+      /* Die ganze Kette bis zum sicheren Platz auf einmal stellen: so bleibt kein
+         Zug auf freier Strecke oder in der Zufahrt stehen und blockiert andere. */
+      const res = lockRouteChain(this, start, dest, { substitute: true, forTrain: tr.id });
+      if (res.ok && res.routes.length) {
+        for (const r of res.routes) r.forTrainId = tr.id;
+        tr.lastRouteError = res.ok ? null : res.reason;
+        this.stats.routesSet += res.routes.length;
+        this.log(`Automatik: ${res.routes.length} Fahrstraße${res.routes.length > 1 ? 'n' : ''} für ${tr.nr} bis ${res.routes[res.routes.length - 1].destName} gestellt.`);
       } else {
+        // unvollständige Kette wieder zurücknehmen
+        for (const r of res.routes) releaseRoute(this, r);
         tr.lastRouteError = res.reason;
       }
     }
@@ -824,7 +853,7 @@ export class Sim {
 
   bestDestination(tr, start) {
     const plan = this.planToSafe(tr, start, new Set(), 3);
-    return plan ? plan.dest : null;
+    return plan ? (plan.safeDest || plan.dest) : null;
   }
 
   planToSafe(tr, start, extraLocked, depth) {
@@ -858,6 +887,13 @@ export class Sim {
       cands.push({ type: 'signal', sig: s });
     }
     for (const e of entries(L)) if (e.name === tr.exitName) cands.push({ type: 'exit', cell: e.cell });
+    // Stumpfgleise (Kopfgleise) sind gültige Zielpunkte – dort endet die Fahrt am Prellbock
+    if (stop) {
+      for (const k in L.cells) {
+        const c = L.cells[k];
+        if (c.ends.length === 1 && !c.entry) cands.push({ type: 'cell', cell: c });
+      }
+    }
 
     const scored = [];
     for (const d of cands) {
@@ -866,6 +902,7 @@ export class Sim {
       if (!r || !r.steps.length) continue;
       const lastStep = r.steps[r.steps.length - 1];
       const last = parseKey(lastStep.k);
+      if (d.type === 'cell' && !stop) continue;
       const serves = stop && r.steps.some(st => {
         const p = parseKey(st.k);
         const c = cellAt(L, p.x, p.y);
@@ -886,15 +923,17 @@ export class Sim {
       if (serves) score -= 80;
       else if (d.type === 'exit') score -= 80;
       else if (reachesPlatform) score -= 20;
+      if (d.type === 'cell') score -= 20;      // Kopfgleis als Zielpunkt bevorzugen
       scored.push({ dest: d, route: r, score, safe: !!(serves || d.type === 'exit' || (!stop && reachesPlatform)) });
     }
     scored.sort((a, b) => a.score - b.score);
 
     for (const cand of scored.slice(0, 6)) {
-      if (cand.safe) return cand;
+      if (cand.safe) return { ...cand, safeDest: cand.dest };
       const merged = new Set(extraLocked);
       for (const st of cand.route.steps) merged.add(st.k);
-      if (this.planToSafe(tr, { type: 'signal', sig: cand.dest.sig }, merged, depth - 1)) return cand;
+      const cont = this.planToSafe(tr, { type: 'signal', sig: cand.dest.sig }, merged, depth - 1);
+      if (cont) return { ...cand, safeDest: cont.safeDest || cont.dest };
     }
     return null;
   }
@@ -1020,7 +1059,9 @@ export function makeTrain(row, idx) {
     gattung: row.gattung || 'RB',
     kind: row.kind || (row.gattung === 'Lok' || row.gattung === 'Rangier' ? 'rangier' : 'zug'),
     vmax: row.vmax || 120,
-    lenM: (row.length || 2) * 100,
+    accel: row.accel || null,
+    brake: row.brake || null,
+    lenM: (row.length || 2) * CELL_M,
     plannedEntry: row.entryTime ?? 0,
     entryName: row.entry,
     exitName: row.exit,
@@ -1044,6 +1085,8 @@ export function makeTrain(row, idx) {
     departAt: 0,
     waitForConnection: false,
     dropConnections: false,
+    trackLog: [],
+    lastSample: 0,
     record: { stops: [], entryAt: null, finishedAt: null, finalDelay: 0 },
     plan: row
   };

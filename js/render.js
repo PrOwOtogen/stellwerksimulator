@@ -335,7 +335,12 @@ function drawTrainNumbers(ctx, L, sim, cs) {
   for (const tr of sim.trains) {
     if (!tr._label || !trainCells(tr).length) continue;
     const col = TRAIN_COLORS[tr.gattung] || '#4da3ff';
-    const text = tr.nr;
+    // haltende und wendende Züge zeigen ihre Abfahrtszeit
+    const zeit = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}:${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
+    const zusatz = tr.state === 'dwell' ? ' ab ' + zeit(tr.departAt)
+      : tr.state === 'turning' ? ' wendet bis ' + zeit(tr.turnReadyAt)
+        : tr.state === 'hold' && tr.waitSignal ? ' ⛔ ' + tr.waitSignal.name : '';
+    const text = tr.nr + zusatz;
     ctx.font = `bold ${Math.max(8, cs * 0.3)}px Segoe UI`;
     const w = ctx.measureText(text).width + 6;
     const x = tr._label.px - w / 2, y = tr._label.py - cs * 0.72;

@@ -43,7 +43,9 @@ export function defaultSettings() {
     punctualLimit: 300,      // Grenze für „pünktlich"
     releaseDelaySec: 90,     // Wartezeit bei der Hilfsauflösung
     crossingCloseSec: 25,    // Schließzeit eines Bahnübergangs
-    accel: 0.7,              // Anfahrbeschleunigung in m/s²
+    metersPerCell: 50,       // Streckenmaßstab: Meter je Rasterzelle
+    dynamicFactor: 1,        // Faktor auf Beschleunigung und Bremsung
+    accel: 0.7,              // Anfahrbeschleunigung in m/s² (wenn die Gattung keine hat)
     brake: 0.9,              // Bremsverzögerung in m/s²
     shuntSpeed: 25,          // Rangiergeschwindigkeit
     divergingSpeed: 40,      // Geschwindigkeit über abzweigende Weichen (Hp2)
@@ -318,7 +320,8 @@ export function validate(L) {
     const c = L.cells[k];
     const t = cellType(c);
     if (t === 'invalid') msgs.push(`⚠ Zelle ${k}: ${c.ends.length} Gleisenden – maximal 4 erlaubt.`);
-    if (t === 'stump' && !c.entry) msgs.push(`ℹ Zelle ${k}: Stumpfgleis ohne Ein-/Ausfahrt.`);
+    if (t === 'stump' && !c.entry && !c.platform && !c.stump)
+      msgs.push(`ℹ Zelle ${k}: Stumpfgleis ohne Ein-/Ausfahrt (Prellbock?).`);
     if (t === 'switch' || t === 'dkw') switchCount++;
     if (t !== 'empty') tracks++;
   }

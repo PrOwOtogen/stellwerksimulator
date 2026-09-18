@@ -228,7 +228,8 @@ export function flankSwitches(sim, steps, maxDepth = 4) {
 export function pointLabel(p) {
   if (!p) return '?';
   if (p.type === 'signal') return p.sig.name;
-  return p.cell.entry || p.cell.stump || 'Gleis';
+  if (p.type === 'exit' || p.type === 'entry') return p.cell.entry || 'Strecke';
+  return p.cell.platform ? `${p.cell.platform} (Gleisende)` : (p.cell.stump || `Gleis ${p.cell.x},${p.cell.y}`);
 }
 
 export function lockRoute(sim, start, dest, opts = {}) {
@@ -537,6 +538,27 @@ export function reachAfterStep(L, step) {
   const n = neighbor(p.x, p.y, step.to);
   if (!cellAt(L, n.x, n.y)) return new Set();
   return reachSet(L, key(n.x, n.y), opp(step.to));
+}
+
+/** Ist ein Bahnsteig von einer Ein-/Ausfahrt aus ohne Richtungswechsel erreichbar? */
+export function canReachPlatform(L, entryCell, platformName) {
+  if (!entryCell || !entryCell.ends.length) return false;
+  const set = reachFromEntry(L, entryCell);
+  for (const k of set) {
+    const p = parseKey(k);
+    const c = cellAt(L, p.x, p.y);
+    if (c && c.platform === platformName) return true;
+  }
+  return false;
+}
+
+/**
+ * Wendefahrt: Einfahrt → Bahnsteig, dort Fahrtrichtungswechsel, dann
+ * Bahnsteig → Ausfahrt. Beide Teile werden getrennt geprüft.
+ */
+export function turnPossible(L, entryCell, platformName, exitCell) {
+  return canReachPlatform(L, entryCell, platformName) &&
+    canReachPlatform(L, exitCell, platformName);
 }
 
 export function workingPossible(L, entryCell, platformName, exitCell) {

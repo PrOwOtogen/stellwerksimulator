@@ -73,6 +73,37 @@ und den Zustand jeder Fahrstraße.
   mit Antwortmöglichkeiten.
 * Zugliste mit Filter und Sortierung, Klick zentriert das Gleisbild auf den Zug.
 
+**Bedienung über die Tastatur**
+
+Die Befehlszeile im Feld „Fahrstraße" nimmt Start und Ziel entgegen – `A N1`,
+`West Ost` oder `Hauptstrecke Gleis 2`. Erlaubt sind Signalnamen, Ein-/Ausfahrten
+und Bahnsteignamen; die passende Fahrstraßenkette wird gestellt.
+
+**Zugdetails**
+
+Ein Klick auf einen Zug in der Liste (oder im Kontextmenü des Gleisbildes) öffnet ein
+Fenster mit Lauf, Zustand, Geschwindigkeit und zulässiger Geschwindigkeit, Zuglänge,
+Beschleunigungs- und Bremswerten, Fahrerlaubnis, allen Halten mit Plan- und Ist-Zeiten
+sowie den Schaltflächen „verfolgen", „Ersatzsignal anfordern" und „Zug streichen".
+
+**Abfahrtstafel**
+
+Je Bahnsteig werden die nächsten Abfahrten mit Ziel und Verspätung angezeigt.
+
+---
+
+## Mitgelieferte Stellwerke
+
+| Vorlage | Besonderheit |
+|---|---|
+| Bahnhof Neustadt | Durchgangsbahnhof, 4 Bahnsteiggleise, 4 Streckenäste, Abstellgruppe, 2 Bahnübergänge |
+| Kreuzungsbahnhof Waldheim | eingleisige Strecke – Zugkreuzungen müssen geplant werden |
+| Kopfbahnhof Seestadt | 4 Kopfgleise, alle Züge wenden, eingleisige Zufahrt |
+| Leeres Stellwerk | leeres Raster für eigene Entwürfe |
+
+Über „Neu" lässt sich eine Vorlage auswählen; jede bringt Gleisplan, Signale und einen
+passenden Fahrplan mit.
+
 ---
 
 ## Stellwerk-Editor
@@ -136,13 +167,19 @@ beauftragt wurde – das dauert je nach Störung einige Minuten.
 
 ---
 
-## Gleisbelegung, Auswertung, Einstellungen
+## Bildfahrplan, Gleisbelegung, Auswertung, Einstellungen
 
+* **Bildfahrplan**: Zeit-Weg-Linien je Strecke – durchgezogen die tatsächliche Fahrt
+  (grün/gelb/rot nach Verspätung), gestrichelt der Fahrplan. Betriebsstellen und
+  Bahnsteige sind als Waagerechte eingezeichnet, Kreuzungen und Überholungen dadurch
+  gut erkennbar.
 * **Gleisbelegung**: Zeit-Gleis-Diagramm mit geplanter (grau) und tatsächlicher
   (grün/rot) Belegung je Bahnsteig, mit Zeitmarke des laufenden Betriebs.
 * **Auswertung**: Kennzahlen, Verspätungsverteilung als Diagramm und eine Tabelle
   aller Züge mit Plan- und Ist-Zeiten je Halt; CSV-Export.
-* **Einstellungen**: Flankenschutz, Durchrutschweg und dessen Auflösezeit,
+* **Einstellungen**: Streckenmaßstab (Meter je Rasterzelle), Fahrdynamik-Faktor,
+  Anfahrbeschleunigung und Bremsverzögerung mit den Profilen „Vorbildgetreu",
+  „Zügig" und „Sehr zügig", Flankenschutz, Durchrutschweg und dessen Auflösezeit,
   Weichenumlaufzeit, Schließzeit der Bahnübergänge, Wartezeit der Hilfsauflösung,
   Mindesthaltezeit, Pünktlichkeitsgrenze, Geschwindigkeiten für Hp2, Zs1 und
   Rangierfahrten sowie Anzeigeoptionen.
@@ -166,6 +203,9 @@ beauftragt wurde – das dauert je nach Störung einige Minuten.
 | Strg+Z / Strg+Y | Editor: rückgängig / wiederholen |
 | F1 | Hilfe |
 
+Fahrstraßen lassen sich auch über die Befehlszeile stellen: Start und Ziel eintippen
+(`A N1`) und Enter drücken.
+
 ---
 
 ## Aufbau des Codes
@@ -181,6 +221,7 @@ beauftragt wurde – das dauert je nach Störung einige Minuten.
 | `js/timetable.js` | Fahrplandaten, Zufalls- und Taktgenerator, Fahrplanprüfung |
 | `js/storage.js` | Stellwerke und Spielstände speichern, Im-/Export, Migration |
 | `js/demo.js` | Beispielstellwerk „Bahnhof Neustadt" |
+| `js/layouts.js` | weitere Stellwerksvorlagen (Kreuzungsbahnhof, Kopfbahnhof) |
 | `js/main.js` | Oberfläche, Bedienung, Diagramme |
 
 Zum Nachsehen in der Browserkonsole steht `window.stellwerk` mit `sim`, `layout` und
@@ -188,8 +229,10 @@ einigen Funktionen bereit.
 
 ### Modellannahmen
 
-Eine Rasterzelle entspricht 100 m Gleis. Beschleunigung 0,7 m/s², Bremsverzögerung
-0,9 m/s². Voreinstellungen: Durchrutschweg 200 m, Weichenumlaufzeit 6 s,
+Eine Rasterzelle entspricht standardmäßig 50 m Gleis (einstellbar von 25 bis 200 m);
+die Zuglänge wird in Zelleneinheiten gerechnet und skaliert mit.
+Jede Zuggattung hat eigene Anfahr- und Bremswerte (S-Bahn 1,25 m/s², Güterzug
+0,25 m/s²). Voreinstellungen: Durchrutschweg 200 m, Weichenumlaufzeit 6 s,
 Mindesthaltezeit 30 s, Hilfsauflösung nach 90 s, Bahnübergang schließt in 25 s.
 Pünktlich ist ein Zug mit weniger als 5 Minuten Verspätung bei der Ausfahrt.
 Fahrtrichtungswechsel gibt es nur als geplante Wende; Automatik und Fahrplangenerator
