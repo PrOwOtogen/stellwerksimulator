@@ -1,30 +1,44 @@
 /* ===================================================================
- * interlocking.js – Fahrstraßensuche und Verschlusslogik
+ * interlocking.js – Fahrstraßensuche, Verschluss und Signalbegriffe
+ *
+ * Umgesetzte Abhängigkeiten:
+ *   • Fahrweg frei, verschlossen gegen andere Fahrstraßen
+ *   • Weichen in Endlage (mit Umlaufzeit), Auffahrschutz
+ *   • Flankenschutz durch benachbarte Weichen
+ *   • Durchrutschweg hinter dem Zielsignal
+ *   • Bahnübergänge geschlossen
+ *   • Signalbegriffe Hp0/Hp1/Hp2/Zs1/Sh1 und Vorsignale Vr0/Vr1/Vr2
  * ================================================================= */
 import {
   key, parseKey, neighbor, opp, cellAt, cellType, exitsFrom,
-  requiredSwitchState, signalAt, switchGeom
+  requiredSwitchState, signalAt, switchGeom, isDiverging, dirDist
 } from './model.js';
 
 let routeCounter = 1;
+export function resetRouteCounter() { routeCounter = 1; }
+
+const settingsOf = sim => sim.layout.settings || {};
+
+/* ===================================================================
+ * Wegesuche
+ * ================================================================= */
 
 /**
- * Sucht einen Weg von einem Startpunkt zu einem Ziel.
  * start: {type:'signal', sig} | {type:'entry', cell}
- * dest : {type:'signal', sig} | {type:'exit',  cell}
- * ctx  : { layout, blocked:Set, locked:Map(cellKey->routeId), occupied:Set, allowOccupied:bool }
- * Ergebnis: { steps:[{k,from,to}], switches:[{k,state}] } oder null
+ * dest : {type:'signal', sig} | {type:'exit', cell} | {type:'cell', cell}
+ * ctx  : { layout, blocked:Set, locked:Map, occupied:Set, allowOccupied, mode }
+ *        mode: 'train' (Zugfahrt) oder 'shunt' (Rangierfahrt)
  */
 export function findRoute(start, dest, ctx) {
   const L = ctx.layout;
+  const mode = ctx.mode || 'train';
   const startStates = [];
   const prefix = [];
 
   if (start.type === 'signal') {
     const s = start.sig;
     const n = neighbor(s.x, s.y, s.dir);
-    const c = cellAt(L, n.x, n.y);
-    if (!c) return null;
+    if (!cellAt(L, n.x, n.y)) return null;
     startStates.push({ k: key(n.x, n.y), from: opp(s.dir) });
   } else {
     const c = start.cell;
@@ -37,18 +51,27 @@ export function findRoute(start, dest, ctx) {
   }
 
   const destSig = dest.type === 'signal' ? dest.sig : null;
-  const destKey = dest.type === 'signal' ? key(dest.sig.x, dest.sig.y) : key(dest.cell.x, dest.cell.y);
+  const destKey = destSig ? key(destSig.x, destSig.y) : key(dest.cell.x, dest.cell.y);
 
-  const cellUsable = (k) => {
+  const usable = (k, isDest) => {
     if (ctx.blocked.has(k)) return false;
     if (ctx.locked.has(k)) return false;
-    if (!ctx.allowOccupied && ctx.occupied.has(k)) return false;
+    if (ctx.occupied.has(k) && !ctx.allowOccupied) {
+      // Rangierfahrten dürfen auf ein besetztes Zielgleis fahren
+      return !!(isDest && mode === 'shunt');
+    }
+    return true;
+  };
+  /** gilt dieses Signal für unsere Fahrt? */
+  const blocksUs = sig => {
+    if (!sig) return false;
+    if (sig.kind === 'distant') return false;             // Vorsignale halten nicht
+    if (mode === 'train' && sig.kind === 'shunt') return false;  // Sperrsignal gilt nur beim Rangieren
     return true;
   };
 
-  // Dijkstra über Zustände (Zelle, Eintrittsende)
   const open = startStates
-    .filter(st => cellUsable(st.k))
+    .filter(st => usable(st.k, st.k === destKey))
     .map(st => ({ ...st, cost: 1, prev: null, to: null }));
   const seen = new Map();
   let goal = null;
@@ -64,38 +87,35 @@ export function findRoute(start, dest, ctx) {
     const c = cellAt(L, x, y);
     if (!c) continue;
 
-    // Ziel erreicht?
     if (cur.k === destKey) {
-      if (dest.type === 'exit') { goal = { ...cur, to: null }; break; }
+      if (dest.type !== 'signal') { goal = { ...cur, to: dest.type === 'exit' ? null : null }; break; }
       const outs = exitsFrom(c, cur.from, true);
       if (outs.includes(destSig.dir)) { goal = { ...cur, to: destSig.dir }; break; }
     }
 
     for (const to of exitsFrom(c, cur.from, true)) {
-      // Kein Signal in Fahrtrichtung überfahren (außer es ist das Zielsignal)
       const sig = signalAt(L, x, y, to);
-      if (sig && !(destSig && sig.id === destSig.id)) continue;
+      if (blocksUs(sig) && !(destSig && sig.id === destSig.id)) continue;
+      // als Flankenschutz festgehaltene Weichen dürfen nicht umgestellt werden
+      const need = requiredSwitchState(c, cur.from, to);
+      if (need >= 0 && ctx.holds && ctx.holds.has(cur.k) && ctx.holds.get(cur.k) !== need) continue;
       const n = neighbor(x, y, to);
       const nk = key(n.x, n.y);
       const nc = cellAt(L, n.x, n.y);
       if (!nc || !nc.ends.includes(opp(to))) continue;
-      if (!cellUsable(nk)) continue;
+      if (!usable(nk, nk === destKey)) continue;
       if (seen.has(nk + '|' + opp(to))) continue;
-      // Weichen in Grundstellung leicht bevorzugen
       let extra = 0;
-      if (cellType(c) === 'switch') {
-        const req = requiredSwitchState(c, cur.from, to);
-        if (req >= 0 && req !== (c.sw | 0)) extra = 0.15;
-      }
+      const req = requiredSwitchState(c, cur.from, to);
+      if (req >= 0 && req !== (c.sw | 0)) extra += 0.15;      // Umstellen kostet Zeit
+      if (isDiverging(c, cur.from, to)) extra += 0.3;          // gerader Strang bevorzugt
       open.push({ k: nk, from: opp(to), cost: cur.cost + 1 + extra, prev: { state: cur, to } });
     }
   }
   if (!goal) return null;
 
-  // Pfad zurückverfolgen
   const steps = [];
-  let node = goal;
-  let outDir = goal.to;
+  let node = goal, outDir = goal.to;
   while (node) {
     steps.unshift({ k: node.k, from: node.from, to: outDir });
     if (!node.prev) break;
@@ -104,107 +124,329 @@ export function findRoute(start, dest, ctx) {
   }
   const full = [...prefix, ...steps];
 
-  // benötigte Weichenstellungen sammeln
   const switches = [];
-  for (const st of full) {
+  let diverging = false, divergeIdx = -1;
+  full.forEach((st, i) => {
     const { x, y } = parseKey(st.k);
     const c = cellAt(L, x, y);
-    if (cellType(c) !== 'switch') continue;
+    if (!['switch', 'dkw'].includes(cellType(c))) return;
     const req = st.from === null ? -1 : requiredSwitchState(c, st.from, st.to);
     if (req >= 0) switches.push({ k: st.k, state: req });
-  }
-  return { steps: full, switches };
+    if (st.from !== null && st.to !== null) {
+      const c2 = { ...c, sw: req >= 0 ? req : c.sw };
+      if (isDiverging(c2, st.from, st.to)) { diverging = true; divergeIdx = i; }
+    }
+  });
+  return { steps: full, switches, diverging, divergeIdx };
 }
 
-/** Beschreibung eines Start-/Zielpunktes für die Anzeige */
-export function pointLabel(p) {
-  if (!p) return '?';
-  if (p.type === 'signal') return p.sig.name;
-  return p.cell.entry || 'Ausfahrt';
+/* ===================================================================
+ * Durchrutschweg und Flankenschutz
+ * ================================================================= */
+
+/** Durchrutschweg hinter dem Zielsignal ermitteln */
+export function computeOverlap(sim, destSig, lengthM, usedKeys) {
+  const L = sim.layout;
+  const cells = Math.max(0, Math.round(lengthM / 100));
+  const steps = [];
+  if (!cells) return steps;
+  let x = destSig.x, y = destSig.y, dir = destSig.dir;
+  for (let i = 0; i < cells; i++) {
+    const n = neighbor(x, y, dir);
+    const nc = cellAt(L, n.x, n.y);
+    const nk = key(n.x, n.y);
+    if (!nc || !nc.ends.includes(opp(dir))) break;
+    if (usedKeys.has(nk) || sim.lockedCells.has(nk) || sim.blockedCells.has(nk)) break;
+    if (sim.occupiedCells().has(nk)) break;
+    steps.push({ k: nk, from: opp(dir), to: null });
+    // in bestehender Weichenlage weiterlaufen
+    const outs = exitsFrom(nc, opp(dir), false);
+    if (!outs.length) break;
+    steps[steps.length - 1].to = outs[0];
+    x = n.x; y = n.y; dir = outs[0];
+  }
+  return steps;
 }
 
 /**
- * Fahrstraße einrichten: prüft Verschlüsse, stellt Weichen, verriegelt.
- * sim = Laufzeitzustand (siehe sim.js)
+ * Flankenschutz: Von jedem offenen Ende des Fahrwegs wird dem Gleis gefolgt,
+ * bis ein deckendes Signal oder die erste Weiche erreicht ist. Zeigt diese
+ * Weiche in den Fahrweg, wird sie abgelenkt und mitverschlossen.
  */
+export function flankSwitches(sim, steps, maxDepth = 4) {
+  const L = sim.layout;
+  const used = new Set(steps.map(s => s.k));
+  const out = [];
+  const seen = new Set();
+  for (const st of steps) {
+    const p = parseKey(st.k);
+    const c = cellAt(L, p.x, p.y);
+    if (!c) continue;
+    for (const d of c.ends) {
+      if (d === st.from || d === st.to) continue;   // im Fahrweg benutzte Enden
+      let x = p.x, y = p.y, dir = d;
+      for (let i = 0; i < maxDepth; i++) {
+        // deckendes Signal in Richtung unseres Fahrwegs?
+        const n = neighbor(x, y, dir);
+        const nc = cellAt(L, n.x, n.y);
+        const nk = key(n.x, n.y);
+        if (!nc || !nc.ends.includes(opp(dir)) || used.has(nk)) break;
+        if (signalAt(L, n.x, n.y, opp(dir))) break;       // Signalflankenschutz
+        const t = cellType(nc);
+        if (t === 'switch' || t === 'dkw') {
+          if (seen.has(nk)) break;
+          seen.add(nk);
+          const towardsUs = opp(dir);
+          if (t === 'switch') {
+            const g = switchGeom(nc);
+            const bi = g.branches.indexOf(towardsUs);
+            // Weiche zeigt nur dann in den Fahrweg, wenn dieser Zweig anliegt
+            if (bi >= 0 && (nc.sw | 0) === bi) out.push({ k: nk, state: 1 - bi, reason: 'Flankenschutz', forStep: st.k });
+            else if (towardsUs === g.root && exitsFrom(nc, g.root, false).length) {
+              // Wurzelseite: Schutzstellung ist nicht möglich, Lage festhalten
+              out.push({ k: nk, state: nc.sw | 0, reason: 'Flankenschutz (Lage festgehalten)', forStep: st.k });
+            }
+          } else {
+            out.push({ k: nk, state: nc.sw | 0, reason: 'Flankenschutz (DKW festgehalten)', forStep: st.k });
+          }
+          break;
+        }
+        const outs = exitsFrom(nc, opp(dir), false);
+        if (!outs.length) break;
+        x = n.x; y = n.y; dir = outs[0];
+      }
+    }
+  }
+  return out;
+}
+
+/* ===================================================================
+ * Fahrstraße einstellen
+ * ================================================================= */
+
+export function pointLabel(p) {
+  if (!p) return '?';
+  if (p.type === 'signal') return p.sig.name;
+  return p.cell.entry || p.cell.stump || 'Gleis';
+}
+
 export function lockRoute(sim, start, dest, opts = {}) {
   const L = sim.layout;
+  const cfg = settingsOf(sim);
+  if (sim.interlockingFault && sim.time < sim.interlockingFault)
+    return { ok: false, reason: 'Stellwerksstörung – derzeit lassen sich keine Fahrstraßen einstellen.' };
+  const mode = opts.shunt ? 'shunt' : 'train';
+  const startSig = start.type === 'signal' ? start.sig : null;
+
+  if (startSig && startSig.blocked && !opts.substitute)
+    return { ok: false, reason: `Signal ${startSig.name} ist gesperrt.` };
+  if (startSig && mode === 'train' && startSig.kind === 'shunt')
+    return { ok: false, reason: `${startSig.name} ist ein Sperrsignal – nur Rangierfahrstraßen möglich.` };
+  if (startSig && startSig.kind === 'distant')
+    return { ok: false, reason: `${startSig.name} ist ein Vorsignal und kennt keine Fahrstraße.` };
+
   const ctx = {
-    layout: L,
-    blocked: sim.blockedCells,
-    locked: sim.lockedCells,
-    occupied: sim.occupiedCells(),
-    allowOccupied: false
+    layout: L, blocked: sim.blockedCells, locked: sim.lockedCells, holds: sim.holdMap(),
+    occupied: sim.occupiedCells(), allowOccupied: false, mode
   };
   const res = findRoute(start, dest, ctx);
-  if (!res) return { ok: false, reason: 'Kein freier Fahrweg vorhanden (belegt, verschlossen oder gestört).' };
+  if (!res) return { ok: false, reason: 'Kein freier Fahrweg vorhanden (besetzt, verschlossen oder gestört).' };
 
   // gestörte Weichen dürfen nicht umgestellt werden
   for (const s of res.switches) {
     const p = parseKey(s.k);
     const c = cellAt(L, p.x, p.y);
-    if (sim.faultySwitches.has(s.k) && (c.sw | 0) !== s.state) {
+    if (sim.faultySwitches.has(s.k) && (c.sw | 0) !== s.state)
       return { ok: false, reason: `Weiche ${s.k} ist gestört und lässt sich nicht umstellen.` };
-    }
   }
 
-  const startSig = start.type === 'signal' ? start.sig : null;
-  const substitute = startSig ? sim.faultySignals.has(startSig.id) : false;
-  if (substitute && !opts.substitute) {
-    return { ok: false, reason: `Signal ${startSig.name} ist gestört. Fahrstraße nur mit Ersatzsignal (Umschalttaste + Klick) möglich.`, needsSubstitute: true };
+  const substitute = startSig ? sim.faultySignals.has(startSig.id) || startSig.blocked : false;
+  if (substitute && !opts.substitute)
+    return {
+      ok: false, needsSubstitute: true,
+      reason: `Signal ${startSig.name} ist gestört. Fahrt nur mit Ersatzsignal (Umschalt + Klick auf das Ziel).`
+    };
+
+  const used = new Set(res.steps.map(s => s.k));
+
+  // Durchrutschweg nur bei Zugfahrten mit Zielsignal
+  let overlap = [];
+  if (mode === 'train' && dest.type === 'signal') {
+    const len = dest.sig.overlap ?? cfg.overlapM ?? 200;
+    overlap = computeOverlap(sim, dest.sig, len, used);
+  }
+
+  // Flankenschutz
+  let flanks = [];
+  if (cfg.flankProtection !== false && mode === 'train') {
+    flanks = flankSwitches(sim, res.steps);
+    const occ = sim.occupiedCells();
+    for (const f of flanks) {
+      const p = parseKey(f.k);
+      const c = cellAt(L, p.x, p.y);
+      const cur = c.sw | 0;
+      const held = sim.flankHoldState(f.k);
+      if (held !== null && held !== f.state)
+        return { ok: false, reason: `Flankenschutz nicht herstellbar: Weiche ${f.k} ist in anderer Lage festgelegt.` };
+      if (cur === f.state) continue;                 // liegt bereits richtig
+      if (sim.lockedCells.has(f.k))
+        return { ok: false, reason: `Flankenschutz nicht herstellbar: Weiche ${f.k} ist verschlossen.` };
+      if (sim.faultySwitches.has(f.k))
+        return { ok: false, reason: `Flankenschutz nicht herstellbar: Weiche ${f.k} ist gestört.` };
+      if (occ.has(f.k))
+        return { ok: false, reason: `Flankenschutz nicht herstellbar: Weiche ${f.k} ist besetzt.` };
+    }
   }
 
   const route = {
     id: 'FS' + (routeCounter++),
-    start, dest,
+    start, dest, mode,
     steps: res.steps,
+    overlap,
     switches: res.switches,
+    flanks,
     signal: startSig,
     entryName: start.type === 'entry' ? start.cell.entry : null,
     destName: pointLabel(dest),
+    diverging: res.diverging,
+    divergeIdx: res.divergeIdx,
     substitute,
     trainId: null,
-    consumed: false,
-    releasedUpTo: -1
+    forTrainId: opts.forTrain || null,
+    passed: false,
+    overlapReleased: overlap.length === 0,
+    releaseAt: null,
+    setAt: sim.time
   };
 
-  for (const s of res.switches) {
+  // Weichen laufen lassen (Umlaufzeit)
+  for (const s of [...res.switches, ...flanks]) {
     const p = parseKey(s.k);
-    cellAt(L, p.x, p.y).sw = s.state;
+    const c = cellAt(L, p.x, p.y);
+    if ((c.sw | 0) !== s.state) sim.moveSwitch(s.k, s.state);
   }
+  // Verschluss
   for (const st of route.steps) sim.lockedCells.set(st.k, route.id);
+  for (const st of route.overlap) sim.lockedCells.set(st.k, route.id);
+  // Flankenschutzweichen werden nur in ihrer Lage festgehalten, nicht gesperrt
+  for (const f of route.flanks) sim.addFlankHold(f.k, route.id, f.state, f.forStep);
+
+  // Bahnübergänge anfordern
+  route.crossings = [...new Set(route.steps.concat(route.overlap).map(st => {
+    const p = parseKey(st.k);
+    const c = cellAt(L, p.x, p.y);
+    return c && c.crossing ? c.crossing.name : null;
+  }).filter(Boolean))];
+  for (const name of route.crossings) sim.requestCrossing(name, route.id);
+
   sim.routes.push(route);
-  if (startSig) sim.signalAspect.set(startSig.id, substitute ? 'Zs1' : 'Hp1');
   return { ok: true, route };
 }
 
-/** Fahrstraße auflösen (Hilfsauflösung oder nach Zugfahrt) */
-export function releaseRoute(sim, route, fromIndex = 0) {
-  for (let i = fromIndex; i < route.steps.length; i++) {
-    const k = route.steps[i].k;
-    if (sim.lockedCells.get(k) === route.id) sim.lockedCells.delete(k);
+/** Ist die Fahrstraße vollständig hergestellt (Weichen, Bahnübergänge)? */
+export function routeReady(sim, route) {
+  for (const s of [...route.switches, ...route.flanks]) {
+    // bereits aufgelöste Abschnitte werden nicht mehr überwacht
+    const stillLocked = sim.lockedCells.get(s.k) === route.id ||
+      (s.forStep && sim.lockedCells.get(s.forStep) === route.id);
+    if (!stillLocked && route.passed) continue;
+    if (sim.switchMoves.has(s.k)) return false;
+    const p = parseKey(s.k);
+    const c = cellAt(sim.layout, p.x, p.y);
+    if ((c.sw | 0) !== s.state) return false;
   }
-  if (fromIndex === 0) {
-    sim.routes = sim.routes.filter(r => r !== route);
-    if (route.signal) sim.signalAspect.set(route.signal.id, 'Hp0');
+  for (const name of route.crossings || []) {
+    const bü = sim.crossingState.get(name);
+    if (!bü || bü.state !== 'closed') return false;
   }
+  return true;
 }
 
-/** Signalbegriff bestimmen */
-export function aspectOf(sim, sig) {
-  if (sim.faultySignals.has(sig.id)) {
-    const a = sim.signalAspect.get(sig.id);
-    return a === 'Zs1' ? 'Zs1' : 'Gestört';
+/** Fahrstraße auflösen; mit { delay:true } als Hilfsauflösung mit Wartezeit */
+export function releaseRoute(sim, route, opts = {}) {
+  if (opts.delay) {
+    const cfg = settingsOf(sim);
+    route.releaseAt = sim.time + (cfg.releaseDelaySec ?? 90);
+    return route.releaseAt;
   }
-  return sim.signalAspect.get(sig.id) || 'Hp0';
+  for (const st of route.steps) if (sim.lockedCells.get(st.k) === route.id) sim.lockedCells.delete(st.k);
+  for (const st of route.overlap) if (sim.lockedCells.get(st.k) === route.id) sim.lockedCells.delete(st.k);
+  sim.removeFlankHolds(route.id);
+  sim.routes = sim.routes.filter(r => r !== route);
+  for (const name of route.crossings || []) sim.releaseCrossing(name, route.id);
+  return null;
+}
+
+/** Nur den Durchrutschweg auflösen */
+export function releaseOverlap(sim, route) {
+  for (const st of route.overlap) if (sim.lockedCells.get(st.k) === route.id) sim.lockedCells.delete(st.k);
+  route.overlapReleased = true;
 }
 
 /* ===================================================================
- * Topologische Erreichbarkeit (ohne Signale, Verschlüsse und Belegung)
- * Wird für den Automatikbetrieb und den Fahrplangenerator benötigt.
+ * Signalbegriffe
+ * ================================================================= */
+
+export function aspectOf(sim, sig) {
+  if (sig.kind === 'distant') return distantAspect(sim, sig);
+  const route = sim.routes.find(r => r.signal && r.signal.id === sig.id && !r.passed);
+  if (!route) {
+    if (sim.faultySignals.has(sig.id)) return 'Gestört';
+    return 'Hp0';
+  }
+  if (!routeReady(sim, route)) return 'Hp0';
+  if (route.mode === 'shunt') return 'Sh1';
+  if (route.substitute) return 'Zs1';
+  return route.diverging ? 'Hp2' : 'Hp1';
+}
+
+/** erwarteter Begriff des nächsten Hauptsignals (für Vorsignale) */
+export function distantAspect(sim, sig) {
+  const next = nextMainSignal(sim.layout, sig.x, sig.y, sig.dir);
+  if (!next) return 'dunkel';
+  const a = aspectOf(sim, next);
+  if (a === 'Hp1') return 'Vr1';
+  if (a === 'Hp2' || a === 'Zs1') return 'Vr2';
+  return 'Vr0';
+}
+
+/** dem Gleis in Fahrtrichtung folgen und das nächste Hauptsignal suchen */
+export function nextMainSignal(L, x, y, dir, maxCells = 40) {
+  let cx = x, cy = y, d = dir;
+  for (let i = 0; i < maxCells; i++) {
+    const sig = signalAt(L, cx, cy, d);
+    if (sig && (sig.kind === 'main' || sig.kind === 'combined') && !(cx === x && cy === y && i === 0)) return sig;
+    if (i > 0) {
+      const s2 = signalAt(L, cx, cy, d);
+      if (s2 && (s2.kind === 'main' || s2.kind === 'combined')) return s2;
+    }
+    const n = neighbor(cx, cy, d);
+    const nc = cellAt(L, n.x, n.y);
+    if (!nc || !nc.ends.includes(opp(d))) return null;
+    const outs = exitsFrom(nc, opp(d), false);
+    if (!outs.length) return null;
+    cx = n.x; cy = n.y; d = outs[0];
+    const sHere = signalAt(L, cx, cy, d);
+    if (sHere && (sHere.kind === 'main' || sHere.kind === 'combined')) return sHere;
+  }
+  return null;
+}
+
+/** zulässige Geschwindigkeit, die ein Signalbegriff erlaubt (km/h) */
+export function aspectSpeed(sim, aspect) {
+  const cfg = settingsOf(sim);
+  switch (aspect) {
+    case 'Hp2': return cfg.divergingSpeed ?? 40;
+    case 'Zs1': return cfg.substituteSpeed ?? 40;
+    case 'Sh1': return cfg.shuntSpeed ?? 25;
+    default: return null;
+  }
+}
+
+/* ===================================================================
+ * Topologische Erreichbarkeit (ohne Signale, Verschlüsse, Belegung)
  * ================================================================= */
 const reachCache = new WeakMap();
-
 function cacheFor(L) {
   let c = reachCache.get(L);
   if (!c) { c = new Map(); reachCache.set(L, c); }
@@ -212,10 +454,6 @@ function cacheFor(L) {
 }
 export function clearReachCache(L) { reachCache.delete(L); }
 
-/**
- * Alle Zellen, die von einem Zustand (Zelle, Eintrittsende) aus ohne
- * Fahrtrichtungswechsel erreichbar sind.
- */
 export function reachSet(L, cellKey, fromEnd) {
   const ck = cellKey + '|' + fromEnd;
   const cache = cacheFor(L);
@@ -234,16 +472,14 @@ export function reachSet(L, cellKey, fromEnd) {
     if (!c) continue;
     for (const to of exitsFrom(c, from, true)) {
       const n = neighbor(p.x, p.y, to);
-      const nk = key(n.x, n.y);
       const nc = cellAt(L, n.x, n.y);
-      if (nc && nc.ends.includes(opp(to))) stack.push([nk, opp(to)]);
+      if (nc && nc.ends.includes(opp(to))) stack.push([key(n.x, n.y), opp(to)]);
     }
   }
   cache.set(ck, out);
   return out;
 }
 
-/** Erreichbarkeit ab einer Ein-/Ausfahrtzelle */
 export function reachFromEntry(L, cell) {
   if (!cell.ends.length) return new Set();
   const to = cell.ends[0];
@@ -253,7 +489,6 @@ export function reachFromEntry(L, cell) {
   return s;
 }
 
-/** Erreichbarkeit hinter dem Zielsignal einer Fahrstraße */
 export function reachAfterStep(L, step) {
   if (step.to === null || step.to === undefined) return new Set();
   const p = parseKey(step.k);
@@ -262,18 +497,13 @@ export function reachAfterStep(L, step) {
   return reachSet(L, key(n.x, n.y), opp(step.to));
 }
 
-/**
- * Gibt es eine durchgehende Fahrt Einfahrt → (Bahnsteig) → Ausfahrt,
- * ohne dass der Zug die Fahrtrichtung wechseln muss?
- */
 export function workingPossible(L, entryCell, platformName, exitCell) {
   if (!entryCell || !exitCell || !entryCell.ends.length) return false;
   const exitKey = key(exitCell.x, exitCell.y);
   const to = entryCell.ends[0];
   const n0 = neighbor(entryCell.x, entryCell.y, to);
   if (!cellAt(L, n0.x, n0.y)) return false;
-  const start = [key(n0.x, n0.y), opp(to), platformName ? 0 : 1];
-  const stack = [start];
+  const stack = [[key(n0.x, n0.y), opp(to), platformName ? 0 : 1]];
   const seen = new Set();
   while (stack.length) {
     const [k, from, got] = stack.pop();
@@ -292,4 +522,30 @@ export function workingPossible(L, entryCell, platformName, exitCell) {
     }
   }
   return false;
+}
+
+/** Weg vom Zug bis zu einem Signal voraus (für Wendefahrten und Nachrücken) */
+export function pathToSignal(sim, fromKey, fromEnd, sig, maxCells = 15) {
+  const L = sim.layout;
+  const steps = [];
+  let k = fromKey, from = fromEnd;
+  const occupied = sim.occupiedCells();
+  for (let i = 0; i < maxCells; i++) {
+    const p = parseKey(k);
+    const c = cellAt(L, p.x, p.y);
+    if (!c) return null;
+    const outs = exitsFrom(c, from, false);
+    if (!outs.length) return null;
+    const to = outs[0];
+    if (i > 0 && (sim.lockedCells.has(k) || sim.blockedCells.has(k))) return null;
+    steps.push({ k, from, to });
+    if (p.x === sig.x && p.y === sig.y && to === sig.dir) return steps;
+    const n = neighbor(p.x, p.y, to);
+    const nk = key(n.x, n.y);
+    const nc = cellAt(L, n.x, n.y);
+    if (!nc || !nc.ends.includes(opp(to))) return null;
+    if (occupied.has(nk)) return null;
+    k = nk; from = opp(to);
+  }
+  return null;
 }

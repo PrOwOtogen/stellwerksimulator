@@ -1,9 +1,9 @@
 # Stellwerksimulator
 
-Ein vollständiger Stellwerksimulator für den Browser: eigene Stellwerke zeichnen,
-Fahrpläne anlegen, Fahrstraßen stellen und den Betrieb gegen zufällige Störungen
-am Laufen halten. Reines HTML/CSS/JavaScript (ES-Module), keine Abhängigkeiten,
-kein Build-Schritt.
+Ein ausführlicher Stellwerksimulator für den Browser: eigene Stellwerke zeichnen,
+Fahrpläne aufstellen, Fahrstraßen mit allen betrieblichen Abhängigkeiten stellen und
+den Betrieb gegen Zufallsereignisse am Laufen halten.
+Reines HTML/CSS/JavaScript (ES-Module), keine Abhängigkeiten, kein Build-Schritt.
 
 ## Starten
 
@@ -14,84 +14,177 @@ python3 -m http.server 8000
 
 Ein lokaler Server ist nötig, weil ES-Module über `file://` nicht geladen werden.
 
-## Die vier Bereiche
+---
 
-### Betrieb
-Das Gleisbild mit Zügen, Signalen, Weichen und Fahrstraßen.
+## Betrieb
 
-* **Fahrstraße stellen:** Startsignal oder Ein-/Ausfahrt anklicken, danach das Ziel
-  (Signal oder Ausfahrt). Der Fahrweg wird gesucht, die Weichen werden gestellt und
-  verschlossen, das Startsignal zeigt Fahrt.
-* **Ersatzsignal (Zs1):** Umschalttaste beim Klick auf das Ziel — erlaubt die Vorbeifahrt
-  an einem gestörten Signal mit höchstens 40 km/h.
-* **Hilfsauflösung:** Rechtsklick auf eine eingestellte Fahrstraße.
-* **Weiche umstellen:** Klick auf die Weiche, solange sie frei und nicht verschlossen ist.
-* **Automatikbetrieb:** stellt Fahrstraßen selbstständig und beauftragt Entstörungen.
-* Start/Pause mit der Leertaste, Zeitraffer 1× bis 60×.
+Das Gleisbild zeigt Gleise, Weichen, Signale, Bahnsteige, Bahnübergänge, Zugnummern
+und den Zustand jeder Fahrstraße.
 
-Die Fahrstraßenlogik verhindert Fahrten über besetzte oder verschlossene Abschnitte,
-das Auffahren auf Weichen, das Überfahren Halt zeigender Signale und stellt jede Zelle
-erst wieder frei, wenn der Zugschluss sie geräumt hat.
+**Fahrstraßen**
 
-### Stellwerk-Editor
-* **Gleis zeichnen:** über das Raster ziehen. Aus drei Gleisenden in einer Zelle wird
-  automatisch eine Weiche, aus vier eine Kreuzung. Diagonalen sind erlaubt.
-* **Hauptsignal / Sperrsignal:** Klick nahe an ein Gleisende; erneuter Klick entfernt es.
-* **Bahnsteig:** über die Gleiszellen ziehen und benennen (Umschalt = löschen).
-* **Ein-/Ausfahrt:** Streckenende benennen — dort erscheinen und verschwinden die Züge.
-* **Geschwindigkeit, Beschriftung, Radieren, Rastergröße, Betriebsbeginn.**
-* **Gleisplan prüfen** meldet ungültige Zellen, Signale ohne Gleisende und fehlende
-  Ein-/Ausfahrten.
+* Start (Signal oder Einfahrt) anklicken, dann das Ziel (Signal, Ausfahrt oder – beim
+  Rangieren – ein Gleis). Während der Auswahl wird der Fahrweg als Vorschau angezeigt.
+* Eine Fahrstraße zeigt erst Fahrt, wenn **alle Weichen in Endlage** liegen
+  (Umlaufzeit), der **Flankenschutz** hergestellt ist, der **Durchrutschweg** frei ist
+  und die **Bahnübergänge geschlossen** sind.
+* Der Verschluss löst sich **zellenweise hinter dem Zugschluss** auf, der Flankenschutz
+  entfällt mit dem jeweils geräumten Abschnitt, der Durchrutschweg nach Stillstand.
+* **Umschalt+Klick** auf das Ziel: Ersatzsignal **Zs1** (Vorbeifahrt am gestörten oder
+  gesperrten Signal, höchstens 40 km/h).
+* **Rangierfahrstraßen** (Taste `R` oder Schalter): über Sperrsignale, höchstens
+  25 km/h, Einfahrt in besetzte Gleise erlaubt.
+* **Fahrstraßenspeicher**: nicht einstellbare Fahrstraßen können vorgemerkt werden und
+  stellen sich selbst ein, sobald der Weg frei wird.
+* **Selbststellbetrieb** je Signal: die zuletzt gestellte Fahrstraße wird beim nächsten
+  Zug automatisch wiederholt.
+* **Automatikbetrieb**: der Rechner disponiert selbst, schließt Bahnübergänge und
+  beauftragt Entstörungen.
 
-### Fahrplan
-Zugnummer, Gattung (ICE bis Güterzug mit passenden Geschwindigkeiten und Längen),
-Einfahrt mit Uhrzeit, Ausfahrt, Halte in der Form `Gleis 2@08:15/08:17` sowie
-V<sub>max</sub> und Zuglänge (in 100-m-Schritten). **Zufallsfahrplan erzeugen** legt
-beliebig viele Fahrten an und verwendet dabei nur Relationen, die im Gleisplan ohne
-Fahrtrichtungswechsel befahrbar sind.
+**Signalbegriffe**
 
-### Ereignisse
-Zufällige Störungen, einzeln abschaltbar und gewichtbar, mit einstellbarer Häufigkeit
-und festem Zufalls-Seed für wiederholbare Läufe:
+| Begriff | Bedeutung |
+|---|---|
+| Hp0 | Halt |
+| Hp1 | Fahrt |
+| Hp2 | Langsamfahrt – der Fahrweg lenkt über eine abzweigende Weiche ab |
+| Zs1 | Ersatzsignal (Vorbeifahrt am Halt zeigenden Signal) |
+| Sh1 | Rangierfahrt frei |
+| Vr0 / Vr1 / Vr2 | Vorsignal: Halt, Fahrt bzw. Langsamfahrt erwarten |
+
+**Weitere Bedienung**
+
+* Klick auf eine Weiche stellt sie um (nicht, wenn verschlossen, besetzt, gestört oder
+  als Flankenschutz festgelegt).
+* Klick auf einen Bahnübergang schließt bzw. öffnet die Schranken.
+* **Rechtsklick** öffnet ein Kontextmenü: Fahrstraße auflösen (bei befahrener
+  Fahrstraße als Hilfsauflösung mit Wartezeit), Selbststellbetrieb, Signalsperre,
+  Ersatzsignal, Gleissperrung, Zug verfolgen.
+* **Zugfunk**: Lokführer melden sich, wenn sie zu lange vor einem Halt zeigenden Signal
+  stehen; Anschlusszüge, Bahnübergänge und Störungen melden sich ebenfalls – jeweils
+  mit Antwortmöglichkeiten.
+* Zugliste mit Filter und Sortierung, Klick zentriert das Gleisbild auf den Zug.
+
+---
+
+## Stellwerk-Editor
+
+* **Gleis zeichnen** über das Raster; aus drei Gleisenden in einer Zelle entsteht eine
+  Weiche, aus vier eine Kreuzung, die sich zur **Doppelkreuzungsweiche** umschalten lässt.
+  Diagonalen sind erlaubt, übersprungene Zellen werden automatisch ergänzt.
+* **Signale**: Hauptsignal, Haupt- mit Vorsignal am Mast, eigenständiges Vorsignal,
+  Sperrsignal. Eigenschaften (Name, Art, eigener Durchrutschweg, Selbststellbetrieb,
+  Sperre) über Rechtsklick.
+* **Bahnsteige**, **Abstellgleise**, **Ein-/Ausfahrten**, **Bahnübergänge**
+  (automatisch oder handbedient), **Geschwindigkeiten**, **Beschriftungen**.
+* **Bausteine**: Gleisverbindung links/rechts, doppelte Gleisverbindung, Bahnsteiggleis,
+  Überholgleis, Stumpfgleis mit Sperrsignal.
+* **Rückgängig/Wiederholen** (Strg+Z / Strg+Y), Zoom, Rastergröße, Betriebsbeginn.
+* **Gleisplan prüfen** meldet ungültige Zellen, doppelte Signalnamen, Signale ohne
+  Gleisende, fehlende Ein-/Ausfahrten.
+
+---
+
+## Fahrplan
+
+Zugnummer, Gattung (ICE bis Nahgüterzug und Lokfahrt mit passenden Geschwindigkeiten
+und Längen), Einfahrt mit Uhrzeit, Ausfahrt, V<sub>max</sub> und Zuglänge.
+
+* **Halte-Editor** je Zug: Bahnsteig, Ankunft, Abfahrt und **Anschlüsse** von anderen
+  Zügen samt maximaler Wartezeit. Kurzschreibweise in der Tabelle:
+  `Gleis 2@08:15/08:17>RE 4711`.
+* **Wende**: ein Zug endet, wechselt nach der Wendezeit die Fahrtrichtung und verkehrt
+  mit neuer Zugnummer zurück.
+* **Taktlinien** anlegen (Gattung, Relation, Halt, erste Abfahrt, Takt, Anzahl, Wende).
+* **Zufallsfahrplan** – verwendet nur Relationen, die im Gleisplan ohne
+  Fahrtrichtungswechsel befahrbar sind.
+* **Fahrplan prüfen** meldet unmögliche Relationen, Halte abseits des Fahrwegs,
+  Zeitfehler und unbekannte Anschlusszüge. **CSV-Export**.
+
+---
+
+## Ereignisse
+
+17 Störungsarten, einzeln abschaltbar, gewichtbar, mit einstellbarer Häufigkeit und
+festem Zufalls-Seed für wiederholbare Läufe:
 
 | Ereignis | Wirkung |
 |---|---|
 | Weichenstörung | Weiche lässt sich nicht mehr umstellen |
-| Signalstörung | Signal zeigt keinen Fahrtbegriff — nur noch Ersatzsignal |
-| Gleissperrung | Abschnitt nicht befahrbar |
-| Verspätete Einfahrt | Zug erreicht das Stellwerk später |
-| Türstörung | verlängerte Haltezeit |
+| Signalstörung | Signal zeigt keinen Fahrtbegriff – nur noch Ersatzsignal |
+| Gleissperrung / Oberleitungsschaden | Abschnitt nicht befahrbar |
+| Gleisfreimeldung gestört | Abschnitt meldet Falschbelegung, Grundstellung nötig |
+| Stellwerksstörung | vorübergehend keine Fahrstraßen einstellbar |
+| Bahnübergangsstörung | Schranken schließen nicht, Fahrten gesperrt |
+| Verspätete Einfahrt / Personalmangel | Zug kommt später |
+| Türstörung / Notarzteinsatz | verlängerte Haltezeit |
 | Fahrzeugstörung | Zug fährt nur noch langsam |
-| Notarzteinsatz | langer außerplanmäßiger Halt |
-| Personen im Gleis | Langsamfahrt 40 km/h im ganzen Bereich |
-| Unwetter | Beschränkung auf 80 km/h |
-| Sonderzug | zusätzlicher, nicht im Fahrplan stehender Zug |
+| Personen im Gleis / Unwetter | Langsamfahrt im ganzen Bereich |
+| Zugausfall | angekündigter Zug entfällt |
+| Sonderzug / Lokfahrt | zusätzlicher, nicht im Fahrplan stehender Zug |
 
 Störungen mit Entstörungsbedarf werden erst behoben, wenn der Entstörungsdienst
-beauftragt wurde — das dauert je nach Störung einige Minuten.
+beauftragt wurde – das dauert je nach Störung einige Minuten.
 
-## Speichern
+---
 
-Stellwerke liegen im `localStorage` des Browsers (Auswahlliste oben rechts) und lassen
-sich als JSON exportieren und wieder importieren. Der Gleisplan, der Fahrplan und die
-Ereigniskonfiguration stecken gemeinsam in einer Datei.
+## Gleisbelegung, Auswertung, Einstellungen
+
+* **Gleisbelegung**: Zeit-Gleis-Diagramm mit geplanter (grau) und tatsächlicher
+  (grün/rot) Belegung je Bahnsteig, mit Zeitmarke des laufenden Betriebs.
+* **Auswertung**: Kennzahlen, Verspätungsverteilung als Diagramm und eine Tabelle
+  aller Züge mit Plan- und Ist-Zeiten je Halt; CSV-Export.
+* **Einstellungen**: Flankenschutz, Durchrutschweg und dessen Auflösezeit,
+  Weichenumlaufzeit, Schließzeit der Bahnübergänge, Wartezeit der Hilfsauflösung,
+  Mindesthaltezeit, Pünktlichkeitsgrenze, Geschwindigkeiten für Hp2, Zs1 und
+  Rangierfahrten sowie Anzeigeoptionen.
+* **Spielstände**: der laufende Betrieb (Uhrzeit, Züge, Fahrstraßen, Verschlüsse,
+  Störungen, Bilanz) lässt sich speichern und wieder laden.
+* Stellwerke liegen im `localStorage` und lassen sich als JSON exportieren und
+  importieren – Gleisplan, Fahrplan, Ereignis- und Betriebseinstellungen in einer Datei.
+
+---
+
+## Tastenkürzel
+
+| Taste | Wirkung |
+|---|---|
+| Leertaste | Start/Pause |
+| `A` | Automatikbetrieb ein/aus |
+| `R` | Rangierfahrstraßen-Modus |
+| `1`…`6` | Zeitraffer 1× bis 60× |
+| `+` / `−` | Gleisbild vergrößern/verkleinern |
+| Esc | Auswahl abbrechen |
+| Strg+Z / Strg+Y | Editor: rückgängig / wiederholen |
+| F1 | Hilfe |
+
+---
 
 ## Aufbau des Codes
 
 | Datei | Inhalt |
 |---|---|
-| `js/model.js` | Datenmodell, Gleistopologie, Weichengeometrie, Prüfung |
-| `js/interlocking.js` | Fahrwegsuche, Verschluss, Signalbegriffe, Erreichbarkeit |
-| `js/sim.js` | Uhr, Fahrdynamik, Belegung, Halte, Automatikbetrieb, Bilanz |
-| `js/events.js` | Zufallsgenerator, Ereignisarten, Störungsverwaltung |
+| `js/model.js` | Datenmodell, Gleistopologie, Weichen- und DKW-Geometrie, Prüfung |
+| `js/interlocking.js` | Wegesuche, Verschluss, Flankenschutz, Durchrutschweg, Signalbegriffe |
+| `js/sim.js` | Uhr, Fahrdynamik, Belegung, Halte, Anschlüsse, Wenden, Zugfunk, Automatik, Spielstände |
+| `js/events.js` | Zufallsgenerator, 17 Ereignisarten, Störungsverwaltung |
 | `js/render.js` | Zeichnen des Gleisbildes |
-| `js/editor.js` | Zeichenwerkzeuge des Editors |
-| `js/timetable.js` | Fahrplandaten, Generator, Fahrplantabelle |
-| `js/storage.js` | Speichern, Laden, Im-/Export |
+| `js/editor.js` | Zeichenwerkzeuge, Bausteine, Rückgängig-Verwaltung |
+| `js/timetable.js` | Fahrplandaten, Zufalls- und Taktgenerator, Fahrplanprüfung |
+| `js/storage.js` | Stellwerke und Spielstände speichern, Im-/Export, Migration |
 | `js/demo.js` | Beispielstellwerk „Bahnhof Neustadt" |
-| `js/main.js` | Oberfläche und Bedienung |
+| `js/main.js` | Oberfläche, Bedienung, Diagramme |
+
+Zum Nachsehen in der Browserkonsole steht `window.stellwerk` mit `sim`, `layout` und
+einigen Funktionen bereit.
 
 ### Modellannahmen
+
 Eine Rasterzelle entspricht 100 m Gleis. Beschleunigung 0,7 m/s², Bremsverzögerung
-0,9 m/s², Mindesthaltezeit 30 s. Pünktlich ist ein Zug mit weniger als 5 Minuten
-Verspätung bei der Ausfahrt.
+0,9 m/s². Voreinstellungen: Durchrutschweg 200 m, Weichenumlaufzeit 6 s,
+Mindesthaltezeit 30 s, Hilfsauflösung nach 90 s, Bahnübergang schließt in 25 s.
+Pünktlich ist ein Zug mit weniger als 5 Minuten Verspätung bei der Ausfahrt.
+Fahrtrichtungswechsel gibt es nur als geplante Wende; Automatik und Fahrplangenerator
+verwenden deshalb nur durchgehend befahrbare Relationen. Die Automatik disponiert
+jeweils nur bis zu einem „sicheren Platz" (Bahnsteig oder Ausfahrt), damit sich Züge
+auf eingleisigen Abschnitten nicht gegenseitig verklemmen.

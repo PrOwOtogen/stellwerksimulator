@@ -1,7 +1,7 @@
 /* ===================================================================
  * events.js – Zufällige Ereignisse und Störungsverwaltung
  * ================================================================= */
-import { cellType, entries, parseKey, cellAt } from './model.js';
+import { cellType, entries, parseKey, cellAt, crossings, platformCells, platforms } from './model.js';
 import { workingPossible } from './interlocking.js';
 import { makeTrain, hhmm, CELL_M } from './sim.js';
 
@@ -40,7 +40,6 @@ export const EVENT_TYPES = [
       const cands = Object.values(sim.layout.signals).filter(s => !sim.faultySignals.has(s.id));
       const s = pick(rng, cands); if (!s) return null;
       sim.faultySignals.add(s.id);
-      sim.signalAspect.set(s.id, 'Hp0');
       return { type: 'signal', target: s.id, title: `Signal ${s.name} gestört`,
         text: 'Signal zeigt keinen Fahrtbegriff mehr. Ersatzsignal mit Shift+Klick.', repairSec: Math.round(between(rng, 180, 600)) };
     },
@@ -152,6 +151,107 @@ export const EVENT_TYPES = [
       return { type: 'sonderzug', target: nr, title: `Sonderzug ${nr}`,
         text: `${row.gattung} ${a.name} → ${b.name}, Einfahrt ca. ${hhmm(row.entryTime)}.`, repairSec: null, autoSec: 300 };
     }
+  },
+  {
+    id: 'bü', name: 'Bahnübergangsstörung', weight: 2,
+    desc: 'Ein Bahnübergang lässt sich nicht mehr schließen; Fahrten sind erst nach Entstörung möglich.',
+    fire(sim, rng) {
+      const cands = [...sim.crossingState.values()].filter(c => !c.fault);
+      const bü = pick(rng, cands); if (!bü) return null;
+      bü.fault = true;
+      if (bü.state !== 'closed') { bü.state = 'open'; bü.readyAt = null; }
+      return { type: 'bü', target: bü.name, title: `Bahnübergang ${bü.name} gestört`,
+        text: 'Schranken schließen nicht – Fahrstraßen über den Übergang bleiben gesperrt.',
+        repairSec: Math.round(between(rng, 300, 900)) };
+    },
+    clear(sim, f) { const b = sim.crossingState.get(f.target); if (b) b.fault = false; }
+  },
+  {
+    id: 'achszaehler', name: 'Gleisfreimeldung gestört', weight: 2,
+    desc: 'Ein Abschnitt meldet dauerhaft „besetzt"; er muss in Grundstellung gebracht werden.',
+    fire(sim, rng) {
+      const cands = Object.values(sim.layout.cells)
+        .filter(c => c.ends.length === 2 && !c.entry && !sim.lockedCells.has(c.x + ',' + c.y));
+      const c = pick(rng, cands); if (!c) return null;
+      const k = c.x + ',' + c.y;
+      sim.blockedCells.add(k);
+      return { type: 'achszaehler', target: k, title: `Gleisfreimeldung ${k} gestört`,
+        text: 'Abschnitt meldet Falschbelegung – Achszähler-Grundstellung nötig.',
+        repairSec: Math.round(between(rng, 120, 420)) };
+    },
+    clear(sim, f) { sim.blockedCells.delete(f.target); }
+  },
+  {
+    id: 'stellwerk', name: 'Stellwerksstörung', weight: 1,
+    desc: 'Für einige Minuten lassen sich überhaupt keine Fahrstraßen mehr einstellen.',
+    fire(sim, rng) {
+      const dur = Math.round(between(rng, 180, 600));
+      sim.interlockingFault = sim.time + dur;
+      return { type: 'stellwerk', target: null, title: 'Stellwerksstörung',
+        text: `Bedienung gestört, voraussichtlich ${Math.round(dur / 60)} min.`,
+        repairSec: null, autoSec: dur };
+    },
+    clear(sim) { sim.interlockingFault = null; }
+  },
+  {
+    id: 'oberleitung', name: 'Oberleitungsschaden', weight: 1,
+    desc: 'Ein Gleisabschnitt ist längere Zeit nicht befahrbar.',
+    fire(sim, rng) {
+      const cands = Object.values(sim.layout.cells)
+        .filter(c => c.ends.length === 2 && !c.entry && !sim.lockedCells.has(c.x + ',' + c.y));
+      const c = pick(rng, cands); if (!c) return null;
+      const k = c.x + ',' + c.y;
+      sim.blockedCells.add(k);
+      return { type: 'oberleitung', target: k, title: `Fahrleitungsschaden ${k}`,
+        text: 'Abschnitt gesperrt, Fahrleitungsmonteur angefordert.',
+        repairSec: Math.round(between(rng, 900, 2700)) };
+    },
+    clear(sim, f) { sim.blockedCells.delete(f.target); }
+  },
+  {
+    id: 'zugausfall', name: 'Zugausfall', weight: 1,
+    desc: 'Ein angekündigter Zug fällt aus und entfällt im Fahrplan.',
+    fire(sim, rng) {
+      const cands = sim.trains.filter(t => t.state === 'pending');
+      const t = pick(rng, cands); if (!t) return null;
+      t.state = 'done';
+      t.record.cancelled = true;
+      sim.stats.cancelled++;
+      return { type: 'zugausfall', target: t.id, title: `${t.nr} fällt aus`,
+        text: `Fahrt ${t.entryName} → ${t.exitName} entfällt.`, repairSec: null, autoSec: 120 };
+    }
+  },
+  {
+    id: 'personal', name: 'Personalmangel', weight: 2,
+    desc: 'Ein Zug kann erst später bereitgestellt werden, weil das Personal fehlt.',
+    fire(sim, rng) {
+      const cands = sim.trains.filter(t => t.state === 'pending' || t.state === 'waiting');
+      const t = pick(rng, cands); if (!t) return null;
+      const extra = Math.round(between(rng, 300, 1200));
+      t.plannedEntry += extra;
+      if (t.state === 'waiting') t.state = 'pending';
+      return { type: 'personal', target: t.id, title: `${t.nr}: fehlendes Personal`,
+        text: `Bereitstellung erst ${hhmm(t.plannedEntry)}.`, repairSec: null, autoSec: 180 };
+    }
+  },
+  {
+    id: 'rangierauftrag', name: 'Lokfahrt / Rangierauftrag', weight: 2,
+    desc: 'Eine langsame Lokleerfahrt wird angemeldet; sie darf auch über Sperrsignale rangiert werden.',
+    fire(sim, rng) {
+      const es = entries(sim.layout);
+      const rels = [];
+      for (const a of es) for (const b of es)
+        if (a.name !== b.name && workingPossible(sim.layout, a.cell, null, b.cell)) rels.push([a, b]);
+      const rel = pick(rng, rels);
+      if (!rel) return null;
+      const [a, b] = rel;
+      const nr = 'Lok ' + Math.floor(between(rng, 100, 999));
+      const row = { nr, gattung: 'Lok', kind: 'rangier', entry: a.name, exit: b.name,
+        entryTime: sim.time + Math.round(between(rng, 60, 300)), vmax: 40, length: 1, stops: [] };
+      sim.trains.push(makeTrain(row, sim.trains.length + 1));
+      return { type: 'rangierauftrag', target: nr, title: `Lokfahrt ${nr}`,
+        text: `Lokleerfahrt ${a.name} → ${b.name} angemeldet (höchstens 40 km/h).`, repairSec: null, autoSec: 300 };
+    }
   }
 ];
 
@@ -175,6 +275,7 @@ export function defaultEventConfig() {
 export class EventEngine {
   constructor(sim, config, log) {
     this.sim = sim;
+    sim.eventEngine = this;
     this.cfg = config || defaultEventConfig();
     this.log = log;
     this.rng = mulberry32(this.cfg.seed | 0);
@@ -226,7 +327,12 @@ export class EventEngine {
       repairing: false
     };
     this.sim.faults.push(fault);
+    this.sim.stats.faultsTotal++;
     this.log(`⚠ ${fault.title}: ${fault.text}`, 'bad');
+    this.sim.addMessage(`${fault.title}: ${fault.text}`, {
+      from: 'Störungsmeldung', kind: 'fault', data: { faultId: fault.id },
+      actions: fault.repairSec ? [{ key: 'repair', label: 'Entstörung beauftragen' }] : []
+    });
     return fault;
   }
 

@@ -1,32 +1,43 @@
 /* ===================================================================
- * render.js – Zeichnen des Gleisbildes auf ein Canvas
+ * render.js – Zeichnen des Gleisbildes
  * ================================================================= */
-import { DIRS, opp, key, parseKey, cellAt, cellType, switchGeom, platformCells } from './model.js';
+import {
+  DIRS, opp, key, parseKey, cellAt, cellType, switchGeom, platformCells, dkwPartner
+} from './model.js';
 import { CELL_M, trainCells } from './sim.js';
-import { aspectOf } from './interlocking.js';
+import { aspectOf, distantAspect } from './interlocking.js';
 
 const COL = {
   bg: '#070a0f', grid: '#141b24',
   track: '#7d8899', trackDim: '#39414d',
-  locked: '#f0f4f8', occupied: '#f85149', blocked: '#c957d6',
-  platform: '#243043', platformEdge: '#3a4a63',
-  text: '#c3cedb', entry: '#4da3ff'
+  locked: '#f0f4f8', overlap: '#7fd8ff', occupied: '#f85149', blocked: '#c957d6',
+  platform: '#243043', platformEdge: '#3a4a63', siding: '#2a2438',
+  text: '#c3cedb', entry: '#4da3ff', moving: '#e3b341'
 };
-const TRAIN_COLORS = { ICE: '#e6e6e6', IC: '#e6e6e6', RE: '#4da3ff', RB: '#3fb950', S: '#63d3a6', Güterzug: '#e3b341', Sonderzug: '#ff9f43' };
+const TRAIN_COLORS = {
+  ICE: '#e8e8e8', IC: '#dcdcdc', RE: '#4da3ff', RB: '#3fb950', S: '#63d3a6',
+  Güterzug: '#e3b341', Nahgüterzug: '#c79a3a', Sonderzug: '#ff9f43', Lok: '#b28cff'
+};
+const ASPECT_COL = {
+  Hp0: '#f85149', Hp1: '#3fb950', Hp2: '#3fb950', Zs1: '#e3b341',
+  Sh1: '#e8e8e8', Gestört: '#c957d6', dunkel: '#3a4553',
+  Vr0: '#f0a04a', Vr1: '#3fb950', Vr2: '#3fb950'
+};
 
+export function cellSizeOf(L, zoom = 1) { return (L.cellSize || 26) * zoom; }
 export function centerOf(x, y, cs) { return { px: (x + 0.5) * cs, py: (y + 0.5) * cs }; }
 export function edgePoint(x, y, d, cs) {
   const c = centerOf(x, y, cs);
   return { px: c.px + DIRS[d].dx * cs / 2, py: c.py + DIRS[d].dy * cs / 2 };
 }
 
-/** Position eines Punktes in Metern entlang eines Fahrweges */
+/** Punkt in Metern entlang eines Fahrweges */
 export function pointAlong(steps, dist, cs) {
   const n = steps.length;
   let idx = Math.floor(dist / CELL_M);
   let f = (dist - idx * CELL_M) / CELL_M;
   if (idx < 0) { idx = 0; f = 0; }
-  if (idx >= n) {           // hinter dem Fahrweg (ausfahrender Zug) verlängern
+  if (idx >= n) {
     const last = steps[n - 1];
     const p = parseKey(last.k);
     const c = centerOf(p.x, p.y, cs);
@@ -46,11 +57,12 @@ export function pointAlong(steps, dist, cs) {
 }
 
 export function draw(canvas, L, sim, opts = {}) {
-  const cs = L.cellSize || 26;
+  const cs = cellSizeOf(L, opts.zoom || 1);
   const ctx = canvas.getContext('2d');
-  const w = L.gridW * cs, h = L.gridH * cs;
+  const w = Math.round(L.gridW * cs), h = Math.round(L.gridH * cs);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, w, h);
+  const set = L.settings || {};
 
   if (opts.grid) {
     ctx.strokeStyle = COL.grid; ctx.lineWidth = 1;
@@ -60,34 +72,53 @@ export function draw(canvas, L, sim, opts = {}) {
     ctx.stroke();
   }
 
-  drawPlatforms(ctx, L, cs);
+  drawAreas(ctx, L, cs);
 
   const occupied = sim ? sim.occupiedCells() : new Set();
-  for (const k in L.cells) drawCell(ctx, L, L.cells[k], cs, sim, occupied);
+  const overlapKeys = new Set();
+  if (sim) for (const r of sim.routes) if (!r.overlapReleased) for (const st of r.overlap || []) overlapKeys.add(st.k);
 
-  if (sim) for (const tr of sim.trains) drawTrain(ctx, tr, cs);
+  for (const k in L.cells) drawCell(ctx, L, L.cells[k], cs, sim, occupied, overlapKeys, set);
+  drawCrossings(ctx, L, cs, sim);
+  if (sim) for (const tr of sim.trains) drawTrain(ctx, tr, cs, set);
   for (const id in L.signals) drawSignal(ctx, L, L.signals[id], cs, sim);
   drawEntries(ctx, L, cs, sim);
   drawLabels(ctx, L, cs);
+  if (sim && set.showZN !== false) drawTrainNumbers(ctx, L, sim, cs);
 
   if (opts.hover) {
     ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 1.5;
     ctx.strokeRect(opts.hover.x * cs + 1, opts.hover.y * cs + 1, cs - 2, cs - 2);
   }
-  if (opts.highlight) for (const k of opts.highlight) {
-    const p = parseKey(k);
-    ctx.fillStyle = 'rgba(77,163,255,.2)';
-    ctx.fillRect(p.x * cs, p.y * cs, cs, cs);
+  if (opts.highlight) {
+    for (const k of opts.highlight) {
+      const p = parseKey(k);
+      ctx.fillStyle = 'rgba(77,163,255,.25)';
+      ctx.fillRect(p.x * cs, p.y * cs, cs, cs);
+    }
+  }
+  if (opts.preview) {
+    ctx.strokeStyle = 'rgba(127,216,255,.7)'; ctx.lineWidth = Math.max(2, cs * 0.16);
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    for (const st of opts.preview) {
+      const p = parseKey(st.k);
+      const c = centerOf(p.x, p.y, cs);
+      ctx.moveTo(c.px - cs * 0.3, c.py); ctx.lineTo(c.px + cs * 0.3, c.py);
+    }
+    ctx.stroke(); ctx.setLineDash([]);
   }
 }
 
-function drawPlatforms(ctx, L, cs) {
-  const names = new Set();
-  for (const k in L.cells) if (L.cells[k].platform) names.add(L.cells[k].platform);
+function drawAreas(ctx, L, cs) {
+  const names = new Set(), sids = new Set();
+  for (const k in L.cells) {
+    if (L.cells[k].platform) names.add(L.cells[k].platform);
+    if (L.cells[k].stump) sids.add(L.cells[k].stump);
+  }
   for (const name of names) {
     const cells = platformCells(L, name);
-    ctx.fillStyle = COL.platform;
-    ctx.strokeStyle = COL.platformEdge;
+    ctx.fillStyle = COL.platform; ctx.strokeStyle = COL.platformEdge;
     for (const c of cells) {
       ctx.fillRect(c.x * cs, c.y * cs + cs * 0.12, cs, cs * 0.76);
       ctx.strokeRect(c.x * cs + .5, c.y * cs + cs * 0.12, cs, cs * 0.76);
@@ -99,9 +130,14 @@ function drawPlatforms(ctx, L, cs) {
     ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     ctx.fillText(name, minX * cs + 2, cy.y * cs + cs * 0.14);
   }
+  for (const name of sids) {
+    const cells = Object.values(L.cells).filter(c => c.stump === name);
+    ctx.fillStyle = COL.siding;
+    for (const c of cells) ctx.fillRect(c.x * cs, c.y * cs + cs * 0.15, cs, cs * 0.7);
+  }
 }
 
-function drawCell(ctx, L, c, cs, sim, occupied) {
+function drawCell(ctx, L, c, cs, sim, occupied, overlapKeys, set) {
   if (!c.ends.length) return;
   const k = key(c.x, c.y);
   const center = centerOf(c.x, c.y, cs);
@@ -109,13 +145,21 @@ function drawCell(ctx, L, c, cs, sim, occupied) {
   let color = COL.track, lw = Math.max(2, cs * 0.12);
   if (sim) {
     if (occupied.has(k)) { color = COL.occupied; lw += 1; }
+    else if (overlapKeys.has(k)) { color = COL.overlap; lw += 0.5; }
     else if (sim.lockedCells.has(k)) { color = COL.locked; lw += 1; }
     if (sim.blockedCells.has(k)) color = COL.blocked;
   }
   const geom = t === 'switch' ? switchGeom(c) : null;
+  const moving = sim && sim.switchMoves.has(k);
+
   for (const d of c.ends) {
     let col = color, dashed = false;
-    if (geom && geom.branches.includes(d) && geom.branches.indexOf(d) !== (c.sw | 0)) { col = COL.trackDim; }
+    if (geom && geom.branches.includes(d) && geom.branches.indexOf(d) !== (c.sw | 0)) col = COL.trackDim;
+    if (t === 'dkw') {
+      const active = dkwPartner(c, d, c.sw | 0);
+      if (active === null) col = COL.trackDim;
+    }
+    if (moving) col = COL.moving;
     if (sim && sim.blockedCells.has(k)) { col = COL.blocked; dashed = true; }
     const e = edgePoint(c.x, c.y, d, cs);
     ctx.strokeStyle = col;
@@ -124,10 +168,21 @@ function drawCell(ctx, L, c, cs, sim, occupied) {
     ctx.beginPath(); ctx.moveTo(center.px, center.py); ctx.lineTo(e.px, e.py); ctx.stroke();
     ctx.setLineDash([]);
   }
-  if (t === 'switch') {
+
+  if (t === 'switch' || t === 'dkw') {
     const faulty = sim && sim.faultySwitches.has(k);
-    ctx.fillStyle = faulty ? '#f85149' : (sim && sim.lockedCells.has(k) ? '#f0f4f8' : '#9fb0c6');
-    ctx.beginPath(); ctx.arc(center.px, center.py, Math.max(2, cs * 0.13), 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = faulty ? '#f85149' : moving ? COL.moving
+      : (sim && sim.lockedCells.has(k) ? '#f0f4f8' : '#9fb0c6');
+    ctx.beginPath();
+    if (t === 'dkw') {
+      const r = Math.max(2.5, cs * 0.15);
+      ctx.moveTo(center.px, center.py - r); ctx.lineTo(center.px + r, center.py);
+      ctx.lineTo(center.px, center.py + r); ctx.lineTo(center.px - r, center.py);
+      ctx.closePath();
+    } else {
+      ctx.arc(center.px, center.py, Math.max(2, cs * 0.13), 0, Math.PI * 2);
+    }
+    ctx.fill();
     if (faulty) {
       ctx.fillStyle = '#f85149';
       ctx.font = `bold ${Math.max(8, cs * 0.4)}px Segoe UI`;
@@ -135,7 +190,8 @@ function drawCell(ctx, L, c, cs, sim, occupied) {
       ctx.fillText('!', center.px, center.py - cs * 0.42);
     }
   }
-  if (c.vmax && isSpeedSectionStart(L, c)) {
+
+  if (c.vmax && set.showVmax !== false && isSpeedSectionStart(L, c)) {
     ctx.fillStyle = '#e3b341';
     ctx.font = `${Math.max(7, cs * 0.28)}px Consolas, monospace`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -143,14 +199,39 @@ function drawCell(ctx, L, c, cs, sim, occupied) {
   }
 }
 
-/** Geschwindigkeit nur am Anfang eines Abschnitts beschriften */
 function isSpeedSectionStart(L, c) {
   for (const d of c.ends) {
-    const n = { x: c.x + DIRS[d].dx, y: c.y + DIRS[d].dy };
-    const nc = cellAt(L, n.x, n.y);
-    if (nc && nc.vmax === c.vmax && (n.x < c.x || (n.x === c.x && n.y < c.y))) return false;
+    const nc = cellAt(L, c.x + DIRS[d].dx, c.y + DIRS[d].dy);
+    if (nc && nc.vmax === c.vmax && (nc.x < c.x || (nc.x === c.x && nc.y < c.y))) return false;
   }
   return true;
+}
+
+function drawCrossings(ctx, L, cs, sim) {
+  for (const k in L.cells) {
+    const c = L.cells[k];
+    if (!c.crossing) continue;
+    const st = sim ? sim.crossingState.get(c.crossing.name) : null;
+    const col = !st ? '#8b98a8'
+      : st.fault ? '#c957d6'
+        : st.state === 'closed' ? '#f85149'
+          : st.state === 'closing' ? '#e3b341' : '#3fb950';
+    const ctr = centerOf(c.x, c.y, cs);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(1.5, cs * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(ctr.px - cs * 0.30, ctr.py - cs * 0.42);
+    ctx.lineTo(ctr.px - cs * 0.30, ctr.py + cs * 0.42);
+    ctx.moveTo(ctr.px + cs * 0.30, ctr.py - cs * 0.42);
+    ctx.lineTo(ctr.px + cs * 0.30, ctr.py + cs * 0.42);
+    ctx.stroke();
+    if (cs >= 20) {
+      ctx.fillStyle = col;
+      ctx.font = `${Math.max(7, cs * 0.26)}px Segoe UI`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText('BÜ', ctr.px, ctr.py + cs * 0.45);
+    }
+  }
 }
 
 function drawSignal(ctx, L, s, cs, sim) {
@@ -158,36 +239,54 @@ function drawSignal(ctx, L, s, cs, sim) {
   const d = DIRS[s.dir];
   const px = c.px + d.dx * cs * 0.40, py = c.py + d.dy * cs * 0.40;
   const perp = { x: -d.dy, y: d.dx };
-  const ox = px + perp.x * cs * 0.28, oy = py + perp.y * cs * 0.28;
-  let aspect = 'Hp0';
-  if (sim) aspect = aspectOf(sim, s);
-  const col = aspect === 'Hp1' ? '#3fb950' : aspect === 'Zs1' ? '#e3b341' : aspect === 'Gestört' ? '#c957d6' : '#f85149';
-  ctx.strokeStyle = '#8b98a8'; ctx.lineWidth = 1;
+  const ox = px + perp.x * cs * 0.30, oy = py + perp.y * cs * 0.30;
+  const aspect = sim ? aspectOf(sim, s) : (s.kind === 'distant' ? 'Vr0' : 'Hp0');
+  const col = ASPECT_COL[aspect] || '#f85149';
+  ctx.strokeStyle = s.blocked ? '#c957d6' : '#8b98a8';
+  ctx.lineWidth = s.blocked ? 2 : 1;
   ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ox, oy); ctx.stroke();
-  ctx.fillStyle = col;
+
   const r = Math.max(2.5, cs * (s.kind === 'shunt' ? 0.11 : 0.15));
-  if (s.kind === 'shunt') { ctx.fillRect(ox - r, oy - r, r * 2, r * 2); }
-  else { ctx.beginPath(); ctx.arc(ox, oy, r, 0, Math.PI * 2); ctx.fill(); }
-  if (cs >= 22) {
-    ctx.fillStyle = COL.text;
+  ctx.fillStyle = col;
+  if (s.kind === 'shunt') {
+    ctx.fillRect(ox - r, oy - r, r * 2, r * 2);
+  } else if (s.kind === 'distant') {
+    ctx.beginPath();
+    ctx.moveTo(ox, oy - r * 1.2); ctx.lineTo(ox + r * 1.2, oy); ctx.lineTo(ox, oy + r * 1.2);
+    ctx.lineTo(ox - r * 1.2, oy); ctx.closePath(); ctx.fill();
+  } else {
+    ctx.beginPath(); ctx.arc(ox, oy, r, 0, Math.PI * 2); ctx.fill();
+    if (s.kind === 'combined' && sim) {
+      // Vorsignal am selben Mast
+      const va = distantAspect(sim, s);
+      if (va && va !== 'dunkel') {
+        ctx.fillStyle = ASPECT_COL[va] || '#3a4553';
+        ctx.beginPath();
+        ctx.arc(ox + perp.x * r * 1.6, oy + perp.y * r * 1.6, r * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+  if (aspect === 'Hp2') {           // zweiter Lichtpunkt für Langsamfahrt
+    ctx.fillStyle = '#e3b341';
+    ctx.beginPath(); ctx.arc(ox - perp.x * r * 1.1, oy - perp.y * r * 1.1, r * 0.45, 0, Math.PI * 2); ctx.fill();
+  }
+  if (cs >= 20) {
+    ctx.fillStyle = s.selfSet ? '#63d3a6' : COL.text;
     ctx.font = `${Math.max(8, cs * 0.3)}px Segoe UI`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.fillText(s.name, ox, oy + r + 1);
+    ctx.fillText(s.name + (s.selfSet ? ' ⟳' : ''), ox, oy + r + 1);
   }
 }
-
 function drawEntries(ctx, L, cs, sim) {
   for (const k in L.cells) {
     const c = L.cells[k];
     if (!c.entry) continue;
     const ctr = centerOf(c.x, c.y, cs);
     ctx.fillStyle = COL.entry;
-    ctx.beginPath();
-    ctx.arc(ctr.px, ctr.py, cs * 0.2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(ctr.px, ctr.py, cs * 0.2, 0, Math.PI * 2); ctx.fill();
     ctx.font = `bold ${Math.max(9, cs * 0.34)}px Segoe UI`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillStyle = COL.entry;
     ctx.fillText(c.entry, ctr.px, c.y * cs - 1);
     if (sim) {
       const waiting = sim.trains.filter(t => t.state === 'waiting' && t.entryName === c.entry);
@@ -195,7 +294,7 @@ function drawEntries(ctx, L, cs, sim) {
         ctx.fillStyle = '#e3b341';
         ctx.font = `${Math.max(8, cs * 0.3)}px Segoe UI`;
         ctx.textBaseline = 'top';
-        ctx.fillText(waiting.map(t => t.nr).join(','), ctr.px, (c.y + 1) * cs + 1);
+        ctx.fillText(waiting.slice(0, 2).map(t => t.nr).join(','), ctr.px, (c.y + 1) * cs + 1);
       }
     }
   }
@@ -210,7 +309,7 @@ function drawLabels(ctx, L, cs) {
   }
 }
 
-function drawTrain(ctx, tr, cs) {
+function drawTrain(ctx, tr, cs, set) {
   if (!trainCells(tr).length) return;
   const head = pointAlong(tr.steps, tr.s, cs);
   const tail = pointAlong(tr.steps, Math.max(0, tr.s - tr.lenM), cs);
@@ -219,8 +318,7 @@ function drawTrain(ctx, tr, cs) {
   ctx.lineWidth = Math.max(3, cs * 0.3);
   ctx.lineCap = 'butt';
   ctx.beginPath();
-  // dem Fahrweg folgen (stützpunktweise)
-  const n = 12;
+  const n = 14;
   for (let i = 0; i <= n; i++) {
     const d = Math.max(0, tr.s - tr.lenM) + (tr.lenM * i / n);
     const p = pointAlong(tr.steps, Math.min(d, tr.s), cs);
@@ -229,8 +327,37 @@ function drawTrain(ctx, tr, cs) {
   ctx.stroke();
   ctx.fillStyle = '#08121f';
   ctx.beginPath(); ctx.arc(head.px, head.py, Math.max(2, cs * 0.1), 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = col;
-  ctx.font = `bold ${Math.max(8, cs * 0.32)}px Segoe UI`;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-  ctx.fillText(tr.nr, (head.px + tail.px) / 2, Math.min(head.py, tail.py) - cs * 0.22);
+  tr._label = { px: (head.px + tail.px) / 2, py: Math.min(head.py, tail.py) };
 }
+
+/** Zugnummernfelder (ZN) über den Zügen */
+function drawTrainNumbers(ctx, L, sim, cs) {
+  for (const tr of sim.trains) {
+    if (!tr._label || !trainCells(tr).length) continue;
+    const col = TRAIN_COLORS[tr.gattung] || '#4da3ff';
+    const text = tr.nr;
+    ctx.font = `bold ${Math.max(8, cs * 0.3)}px Segoe UI`;
+    const w = ctx.measureText(text).width + 6;
+    const x = tr._label.px - w / 2, y = tr._label.py - cs * 0.72;
+    ctx.fillStyle = 'rgba(8,14,22,.85)';
+    ctx.fillRect(x, y, w, cs * 0.38);
+    ctx.strokeStyle = col; ctx.lineWidth = 1;
+    ctx.strokeRect(x + .5, y + .5, w, cs * 0.38);
+    ctx.fillStyle = col;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(text, tr._label.px, y + cs * 0.04);
+    if (tr.delay > 180) {
+      ctx.fillStyle = tr.delay > 300 ? '#f85149' : '#e3b341';
+      ctx.font = `${Math.max(7, cs * 0.26)}px Segoe UI`;
+      ctx.fillText('+' + Math.round(tr.delay / 60), tr._label.px + w / 2 + cs * 0.22, y + cs * 0.06);
+    }
+  }
+}
+
+/** Legende für die Betriebsansicht */
+export const LEGEND = [
+  ['#3fb950', 'Fahrt (Hp1/Hp2)'], ['#f85149', 'Halt (Hp0) / besetzt'],
+  ['#e3b341', 'Ersatzsignal, Weiche läuft'], ['#f0f4f8', 'Fahrstraße verschlossen'],
+  ['#7fd8ff', 'Durchrutschweg'], ['#c957d6', 'gesperrt/gestört'],
+  ['#e8e8e8', 'Rangierfahrt (Sh1)']
+];

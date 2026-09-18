@@ -54,3 +54,32 @@ td input{width:100%;min-width:60px}
 .modal-box{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:340px;max-width:620px;max-height:80vh;overflow:auto}
 .modal-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:10px}
 .delay-ok{color:var(--ok)} .delay-mid{color:var(--warn)} .delay-bad{color:var(--bad)}
+
+/* ---------- Ausbau: Meldungen, Kontextmenü, Diagramme ---------- */
+.messages{max-height:190px;overflow-y:auto}
+.messages .msg{border:1px solid var(--line);border-radius:4px;padding:5px;margin-bottom:5px;background:#0f141b}
+.messages .msg.call{border-color:#5a4a1e;background:#1b1a12}
+.messages .msg.fault{border-color:#5a2222;background:#1c1414}
+.messages .msg .head{display:flex;justify-content:space-between;color:var(--muted);font-size:11px}
+.messages .msg .acts{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
+.messages .msg.answered{opacity:.5}
+.zoom-box{position:absolute;right:10px;bottom:10px;display:flex;align-items:center;gap:4px;background:rgba(10,14,20,.9);border:1px solid var(--line);border-radius:4px;padding:2px 4px}
+.zoom-box span{font-size:11px;color:var(--muted);min-width:44px;text-align:center}
+.ctxmenu{position:fixed;z-index:60;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px;min-width:200px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.ctxmenu.hidden{display:none}
+.ctxmenu button{display:block;width:100%;text-align:left;border:0;background:transparent;padding:5px 8px;border-radius:4px}
+.ctxmenu button:hover{background:#273140}
+.ctxmenu .sep{height:1px;background:var(--line);margin:4px 0}
+.ctxmenu .title{font-size:11px;color:var(--muted);padding:2px 8px}
+.legend{display:grid;grid-template-columns:auto 1fr;gap:3px 8px;font-size:11px;align-items:center}
+.legend i{width:14px;height:8px;display:block;border-radius:2px}
+.settings-grid{display:grid;grid-template-columns:1fr auto;gap:6px 12px;align-items:center}
+.settings-grid label{margin:0;color:var(--fg)}
+.settings-grid input[type=number],.settings-grid input[type=text]{width:7em}
+#occ-canvas,#report-canvas{width:100%;background:#0a0e14;border:1px solid var(--line);border-radius:6px;margin-top:8px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:24px;background:#1b222d;border:1px solid var(--accent);border-radius:6px;padding:8px 14px;z-index:70}
+.toast.hidden{display:none}
+.modal-box h3{margin:0 0 8px;font-size:14px}
+.stop-editor table{margin-bottom:6px}
+.kbd{background:#0f141b;border:1px solid var(--line);border-radius:3px;padding:0 4px;font:11px Consolas,monospace}
+.helpgrid{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px}

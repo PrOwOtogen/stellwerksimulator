@@ -14,27 +14,33 @@
     <button class="tab" data-view="editor">Stellwerk-Editor</button>
     <button class="tab" data-view="timetable">Fahrplan</button>
     <button class="tab" data-view="events">Ereignisse</button>
+    <button class="tab" data-view="occupancy">Gleisbelegung</button>
+    <button class="tab" data-view="report">Auswertung</button>
+    <button class="tab" data-view="settings">Einstellungen</button>
   </nav>
   <div class="spacer"></div>
   <div id="clock-box">
     <span id="clock">06:00:00</span>
-    <button id="btn-play" title="Start/Pause">▶</button>
+    <button id="btn-play" title="Start/Pause (Leertaste)">▶</button>
     <label>Tempo
       <select id="speed">
         <option value="1">1×</option>
+        <option value="2">2×</option>
         <option value="5">5×</option>
         <option value="10" selected>10×</option>
         <option value="30">30×</option>
         <option value="60">60×</option>
+        <option value="120">120×</option>
       </select>
     </label>
   </div>
   <div id="file-box">
     <select id="stw-select" title="Stellwerk wählen"></select>
     <button id="btn-new">Neu</button>
-    <button id="btn-save">Speichern</button>
+    <button id="btn-save" title="Stellwerk im Browser speichern">Speichern</button>
     <button id="btn-export">Export</button>
     <button id="btn-import">Import</button>
+    <button id="btn-help" title="Hilfe (F1)">?</button>
     <input type="file" id="import-file" accept="application/json" hidden>
   </div>
 </header>
@@ -45,33 +51,61 @@
     <div class="canvas-wrap">
       <canvas id="canvas"></canvas>
       <div id="canvas-hint" class="hint"></div>
+      <div id="zoom-box" class="zoom-box">
+        <button data-zoom="-">−</button><span id="zoom-label">100 %</span><button data-zoom="+">+</button>
+      </div>
     </div>
     <aside class="sidebar">
       <div class="panel">
         <h2>Fahrstraße</h2>
         <div id="route-status" class="status">Startsignal oder Einfahrt anklicken.</div>
-        <button id="btn-route-cancel" class="wide">Auswahl abbrechen (Esc)</button>
-        <label class="check"><input type="checkbox" id="auto-route"> Automatikbetrieb (Fahrstraßen selbst stellen)</label>
+        <div class="row">
+          <button id="btn-route-cancel">Abbrechen (Esc)</button>
+          <label class="check"><input type="checkbox" id="shunt-mode"> Rangierfahrstraße (R)</label>
+        </div>
+        <label class="check"><input type="checkbox" id="auto-route"> Automatikbetrieb (A)</label>
+        <label class="check"><input type="checkbox" id="queue-mode"> Nicht mögliche Fahrstraßen speichern</label>
+        <div id="queue-list" class="small"></div>
         <button id="btn-reset" class="wide">Betrieb zurücksetzen</button>
-        <p class="small">Linksklick Signal/Einfahrt = Start, zweiter Klick = Ziel. Umschalt+Klick auf das Ziel: Ersatzsignal. Rechtsklick auf eine Fahrstraße: Hilfsauflösung. Klick auf eine Weiche stellt sie um.</p>
+        <p class="small">Klick: Start → Ziel. Umschalt+Klick auf das Ziel: Ersatzsignal. Rechtsklick: Menü (Auflösung, Selbststellbetrieb, Sperren). Klick auf eine Weiche stellt sie um.</p>
       </div>
       <div class="panel">
-        <h2>Züge</h2>
+        <h2>Zugfunk und Meldungen</h2>
+        <div id="messages" class="messages"></div>
+      </div>
+      <div class="panel">
+        <h2>Züge <span id="train-count" class="small"></span></h2>
+        <div class="row">
+          <input type="text" id="train-filter" placeholder="Filter: Zugnummer, Gleis …" style="flex:1">
+          <select id="train-sort">
+            <option value="time">nach Zeit</option>
+            <option value="delay">nach Verspätung</option>
+            <option value="nr">nach Nummer</option>
+          </select>
+        </div>
         <table id="train-table"><thead>
-          <tr><th>Zug</th><th>Von→Nach</th><th>Ziel/Halt</th><th>Verspätung</th></tr>
+          <tr><th>Zug</th><th>Von→Nach</th><th>Ziel/Halt</th><th>Versp.</th></tr>
         </thead><tbody></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Bahnübergänge</h2>
+        <div id="crossing-list" class="small"></div>
       </div>
       <div class="panel">
         <h2>Störungen</h2>
         <div id="fault-list" class="fault-list"><em>keine</em></div>
       </div>
       <div class="panel">
-        <h2>Meldungen</h2>
+        <h2>Meldungsbuch</h2>
         <div id="log" class="log"></div>
       </div>
       <div class="panel">
         <h2>Bilanz</h2>
         <div id="score" class="score"></div>
+      </div>
+      <div class="panel">
+        <h2>Legende</h2>
+        <div id="legend" class="legend"></div>
       </div>
     </aside>
   </section>
@@ -81,35 +115,54 @@
     <div class="canvas-wrap">
       <canvas id="canvas-edit"></canvas>
       <div id="edit-hint" class="hint"></div>
+      <div id="zoom-box-edit" class="zoom-box">
+        <button data-zoom="-">−</button><span id="zoom-label-edit">100 %</span><button data-zoom="+">+</button>
+      </div>
     </div>
     <aside class="sidebar">
       <div class="panel">
         <h2>Werkzeug</h2>
         <div class="tools">
-          <button class="tool active" data-tool="track">Gleis zeichnen</button>
+          <button class="tool active" data-tool="track">Gleis</button>
           <button class="tool" data-tool="erase">Radieren</button>
           <button class="tool" data-tool="signal">Hauptsignal</button>
+          <button class="tool" data-tool="distant">Vorsignal</button>
           <button class="tool" data-tool="shunt">Sperrsignal</button>
           <button class="tool" data-tool="platform">Bahnsteig</button>
+          <button class="tool" data-tool="siding">Abstellgleis</button>
           <button class="tool" data-tool="entry">Ein-/Ausfahrt</button>
+          <button class="tool" data-tool="crossing">Bahnübergang</button>
+          <button class="tool" data-tool="dkw">DKW</button>
           <button class="tool" data-tool="speed">Geschwindigkeit</button>
           <button class="tool" data-tool="label">Beschriftung</button>
+          <button class="tool" data-tool="select">Auswählen</button>
         </div>
         <p class="small" id="tool-help"></p>
+        <div class="row">
+          <button id="btn-undo" title="Strg+Z">↶ Rückgängig</button>
+          <button id="btn-redo" title="Strg+Y">↷ Wiederholen</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Bausteine</h2>
+        <select id="template-select"></select>
+        <p class="small">Baustein wählen und anschließend in den Plan klicken (Werkzeug „Baustein setzen" wird aktiv).</p>
+        <button id="btn-template" class="wide">Baustein setzen</button>
       </div>
       <div class="panel">
         <h2>Stellwerk</h2>
         <label>Name <input id="stw-name" type="text"></label>
-        <label>Spalten <input id="grid-w" type="number" min="10" max="200" step="1"></label>
-        <label>Zeilen <input id="grid-h" type="number" min="6" max="120" step="1"></label>
+        <label>Spalten <input id="grid-w" type="number" min="10" max="240" step="1"></label>
+        <label>Zeilen <input id="grid-h" type="number" min="6" max="160" step="1"></label>
         <label>Zellgröße <input id="cell-size" type="range" min="14" max="48" step="2"></label>
         <label>Betriebsbeginn <input id="start-time" type="text" style="width:6em" placeholder="06:00"></label>
         <button id="btn-clear" class="wide danger">Gleisplan leeren</button>
         <button id="btn-demo" class="wide">Demo-Stellwerk laden</button>
       </div>
       <div class="panel">
-        <h2>Elemente</h2>
-        <div id="element-info" class="small">Nichts ausgewählt.</div>
+        <h2>Element</h2>
+        <div id="element-info" class="small">Mauszeiger über den Gleisplan bewegen.</div>
+        <p class="small">Rechtsklick auf ein Element öffnet seine Eigenschaften.</p>
       </div>
       <div class="panel">
         <h2>Prüfung</h2>
@@ -126,12 +179,17 @@
         <h2>Fahrplan</h2>
         <div class="row">
           <button id="btn-add-train">Zug hinzufügen</button>
-          <button id="btn-gen-train">Zufallsfahrplan erzeugen</button>
-          <label>Anzahl <input id="gen-count" type="number" value="12" min="1" max="200" style="width:5em"></label>
+          <button id="btn-gen-train">Zufallsfahrplan</button>
+          <label>Anzahl <input id="gen-count" type="number" value="14" min="1" max="200" style="width:5em"></label>
+          <button id="btn-takt">Taktlinie anlegen …</button>
+          <button id="btn-check-tt">Fahrplan prüfen</button>
+          <button id="btn-tt-csv">CSV exportieren</button>
           <button id="btn-del-all" class="danger">Alle löschen</button>
         </div>
+        <div id="tt-check" class="small"></div>
         <table id="tt-table"><thead>
-          <tr><th>Zugnr.</th><th>Gattung</th><th>Einfahrt</th><th>Zeit</th><th>Ausfahrt</th><th>Halte (Bstg@An/Ab)</th><th>V<sub>max</sub></th><th>Länge</th><th></th></tr>
+          <tr><th>Zugnr.</th><th>Gattung</th><th>Einfahrt</th><th>Zeit</th><th>Ausfahrt</th>
+              <th>Halte</th><th>Wende</th><th>V<sub>max</sub></th><th>Länge</th><th></th></tr>
         </thead><tbody></tbody></table>
       </div>
     </div>
@@ -143,20 +201,80 @@
       <div class="panel">
         <h2>Zufällige Ereignisse</h2>
         <label class="check"><input type="checkbox" id="ev-enabled" checked> Zufallsereignisse aktiv</label>
-        <label>Häufigkeit (Ereignisse pro Stunde) <input id="ev-rate" type="number" min="0" max="60" step="0.5" value="4"></label>
-        <label>Zufalls-Seed <input id="ev-seed" type="number" step="1" value="1337"></label>
+        <div class="row">
+          <label>Ereignisse je Stunde <input id="ev-rate" type="number" min="0" max="60" step="0.5" value="4" style="width:5em"></label>
+          <label>Zufalls-Seed <input id="ev-seed" type="number" step="1" value="1337" style="width:7em"></label>
+          <button id="btn-ev-test">Zufälliges Ereignis auslösen</button>
+        </div>
         <table id="ev-table"><thead>
-          <tr><th>aktiv</th><th>Ereignis</th><th>Gewicht</th><th>Beschreibung</th></tr>
+          <tr><th>aktiv</th><th>Ereignis</th><th>Gewicht</th><th>Beschreibung</th><th></th></tr>
         </thead><tbody></tbody></table>
-        <button id="btn-ev-test">Ereignis sofort auslösen</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= GLEISBELEGUNG ======================= -->
+  <section id="view-occupancy" class="view">
+    <div class="wide-pane">
+      <div class="panel">
+        <h2>Gleisbelegung (Plan und Ist)</h2>
+        <div class="row">
+          <label>Von <input id="occ-from" type="text" value="06:00" style="width:5em"></label>
+          <label>Bis <input id="occ-to" type="text" value="12:00" style="width:5em"></label>
+          <button id="btn-occ-refresh">Aktualisieren</button>
+          <span class="small">Grau = Fahrplan, farbig = tatsächliche Belegung.</span>
+        </div>
+        <canvas id="occ-canvas"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= AUSWERTUNG ======================= -->
+  <section id="view-report" class="view">
+    <div class="wide-pane">
+      <div class="panel">
+        <h2>Betriebsauswertung</h2>
+        <div class="row">
+          <button id="btn-report-refresh">Aktualisieren</button>
+          <button id="btn-report-csv">CSV exportieren</button>
+        </div>
+        <div id="report-kpi" class="score"></div>
+        <canvas id="report-canvas"></canvas>
+        <table id="report-table"><thead>
+          <tr><th>Zug</th><th>Gattung</th><th>Relation</th><th>Halte (Plan → Ist)</th><th>Zustand</th><th>Verspätung</th></tr>
+        </thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= EINSTELLUNGEN ======================= -->
+  <section id="view-settings" class="view">
+    <div class="wide-pane">
+      <div class="panel">
+        <h2>Betriebliche Einstellungen</h2>
+        <div id="settings-form" class="settings-grid"></div>
+      </div>
+      <div class="panel">
+        <h2>Spielstände</h2>
+        <div class="row">
+          <input type="text" id="save-name" placeholder="Name des Spielstands" style="flex:1">
+          <button id="btn-savegame">Betrieb speichern</button>
+        </div>
+        <div id="savegame-list" class="small"></div>
       </div>
     </div>
   </section>
 </main>
 
-<div id="modal" class="modal hidden"><div class="modal-box"><div id="modal-body"></div>
+<div id="ctxmenu" class="ctxmenu hidden"></div>
+
+<div id="modal" class="modal hidden"><div class="modal-box">
+  <h3 id="modal-title"></h3>
+  <div id="modal-body"></div>
   <div class="modal-actions"><button id="modal-ok">OK</button><button id="modal-cancel">Abbrechen</button></div>
 </div></div>
+
+<div id="toast" class="toast hidden"></div>
 
 <script type="module" src="js/main.js"></script>
 </body>

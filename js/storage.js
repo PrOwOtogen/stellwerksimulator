@@ -1,6 +1,8 @@
 /* ===================================================================
  * storage.js – Speichern im Browser und Im-/Export als JSON-Datei
  * ================================================================= */
+import { defaultSettings } from './model.js';
+
 const KEY = 'stellwerksim.layouts';
 
 export function listNames() {
@@ -51,6 +53,8 @@ export function importFile(file) {
 /** ältere/unvollständige Dateien auf das aktuelle Format bringen */
 export function migrate(L) {
   L.version = L.version || 1;
+  if (!L.settings) L.settings = defaultSettings();
+  else L.settings = { ...defaultSettings(), ...L.settings };
   L.cells = L.cells || {};
   L.signals = L.signals || {};
   L.labels = L.labels || [];
@@ -64,6 +68,40 @@ export function migrate(L) {
     if (c.platform === undefined) c.platform = null;
     if (c.entry === undefined) c.entry = null;
     if (c.vmax === undefined) c.vmax = null;
+    if (c.crossing === undefined) c.crossing = null;
+    if (c.stump === undefined) c.stump = null;
+    if (c.dkw === undefined) c.dkw = false;
   }
+  for (const id in L.signals) {
+    const s = L.signals[id];
+    if (!s.kind) s.kind = 'main';
+    if (s.overlap === undefined) s.overlap = null;
+    if (s.selfSet === undefined) s.selfSet = false;
+    if (s.blocked === undefined) s.blocked = false;
+  }
+  for (const row of L.timetable) {
+    row.stops = (row.stops || []).map(st => ({ ...st, connections: st.connections || [] }));
+    if (row.turn === undefined) row.turn = null;
+  }
+  L.version = 2;
   return L;
+}
+
+/* ---------------- Spielstände (laufender Betrieb) ---------------- */
+const SAVE_KEY = 'stellwerksim.saves';
+
+export function listSaves() {
+  try { return JSON.parse(localStorage.getItem(SAVE_KEY) || '{}'); }
+  catch { return {}; }
+}
+export function saveGame(name, payload) {
+  const all = listSaves();
+  all[name] = { ...payload, savedAt: new Date().toISOString() };
+  localStorage.setItem(SAVE_KEY, JSON.stringify(all));
+}
+export function loadGame(name) { return listSaves()[name] || null; }
+export function deleteGame(name) {
+  const all = listSaves();
+  delete all[name];
+  localStorage.setItem(SAVE_KEY, JSON.stringify(all));
 }
