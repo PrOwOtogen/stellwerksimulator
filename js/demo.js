@@ -96,12 +96,14 @@ export function demoLayout() {
   sig(L, 'Ra2', 41, 13, 4, 'shunt');           // aus der Abstellgruppe zurück
   sig(L, 'Ra3', 40, 13, 0, 'shunt');
 
-  /* --- Geschwindigkeiten --- */
+  /* --- Geschwindigkeiten: Weichenbereiche langsam, Bahnsteiggleise zügig --- */
   for (const k in L.cells) {
     const c = L.cells[k];
-    if (c.x >= 12 && c.x <= 46 && c.y !== 9) c.vmax = 60;
-    if (c.y === 13) c.vmax = 25;
-    if (c.y === 9 && c.x > 46) c.vmax = 100;
+    const weichenbereich = (c.x >= 12 && c.x <= 19) || (c.x >= 36 && c.x <= 47);
+    if (weichenbereich && c.y !== 9) c.vmax = 60;
+    if (c.x >= 20 && c.x <= 35 && c.y !== 9) c.vmax = 100;
+    if (c.y === 13) c.vmax = 25;                       // Abstellgruppe
+    if (c.y === 9 && c.x > 47) c.vmax = 100;           // Abzweig Süd
   }
 
   L.labels = [

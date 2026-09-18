@@ -9,7 +9,8 @@ import {
   Sim, hhmmss, hhmm, signedMin, parseTime, trainCells, CELL_M
 } from './sim.js';
 import {
-  lockRoute, releaseRoute, aspectOf, clearReachCache, findRoute, pointLabel
+  lockRoute, releaseRoute, aspectOf, clearReachCache, findRoute, pointLabel,
+  routeBlockReason, lockRouteChain
 } from './interlocking.js';
 import { EventEngine, EVENT_TYPES, defaultEventConfig } from './events.js';
 import { draw, cellSizeOf, LEGEND } from './render.js';
@@ -94,7 +95,7 @@ function loop(now) {
     if (now - lastPanel > 400) {
       lastPanel = now;
       updateTrainTable(); updateFaults(); updateScore(); updateMessages();
-      updateCrossingPanel(); updateQueuePanel();
+      updateCrossingPanel(); updateQueuePanel(); updateRouteList();
     }
   } else if (app.view === 'editor') {
     draw($('#canvas-edit'), app.layout, null, {
@@ -189,15 +190,29 @@ function onSimClick(e) {
   else return setStatus('Ziel muss ein Signal oder eine Ausfahrt sein.', true);
 
   const opts = { substitute: e.shiftKey, shunt: app.shuntMode };
-  const res = lockRoute(sim, app.routeStart, dest, opts);
-  if (res.ok) {
-    sim.stats.routesSet++;
-    if (res.route.mode === 'shunt') sim.stats.shuntMoves++;
-    if (res.route.signal) res.route.signal.lastDest = Sim.refOfDest(dest);
-    logMsg(`${res.route.id}: ${label(app.routeStart)} → ${res.route.destName}` +
-      `${res.route.substitute ? ' (Ersatzsignal)' : ''}${res.route.mode === 'shunt' ? ' (Rangierfahrt)' : ''}` +
-      `${res.route.diverging ? ' – Langsamfahrt' : ''} eingestellt.`, 'ok');
-    setStatus(`Fahrstraße ${res.route.id} eingestellt.`);
+  // Zuglenkung: liegen Signale dazwischen, wird die ganze Kette gestellt
+  const res = lockRouteChain(sim, app.routeStart, dest, opts);
+  const von = label(app.routeStart);
+
+  if (res.routes.length) {
+    sim.stats.routesSet += res.routes.length;
+    for (const r of res.routes) {
+      if (r.mode === 'shunt') sim.stats.shuntMoves++;
+      if (r.signal) r.signal.lastDest = Sim.refOfDest(r.dest);
+    }
+    const kette = res.routes.map(r => r.destName).join(' → ');
+    logMsg(`${res.routes.length} Fahrstraße${res.routes.length > 1 ? 'n' : ''}: ${von} → ${kette}` +
+      `${res.routes.some(r => r.substitute) ? ' (Ersatzsignal)' : ''}` +
+      `${res.routes.some(r => r.diverging) ? ' – Langsamfahrt' : ''} eingestellt.`, 'ok');
+    const why = res.routes.map(r => routeBlockReason(sim, r)).find(Boolean);
+    setStatus(`${res.routes.length} von ${res.gesamt} Teilfahrstraßen eingestellt: ${escapeHtml(von)} → ${escapeHtml(kette)}.` +
+      (why ? ` <span style="color:var(--warn)">Halt – wartet: ${escapeHtml(why)}</span>` : '') +
+      (res.ok ? '' : ` <span style="color:var(--warn)">Weiter geht es nicht: ${escapeHtml(res.reason)}</span>`));
+    if (why && /geschlossen werden|gestört/.test(why)) toast(why);
+    if (!res.ok && app.queueMode && res.restStart) {
+      sim.queueRoute(res.restStart, res.restDest, opts);
+      toast('Restweg in den Fahrstraßenspeicher gelegt.');
+    }
   } else if (app.queueMode && !res.needsSubstitute) {
     sim.queueRoute(app.routeStart, dest, opts);
     setStatus(`In den Fahrstraßenspeicher gelegt: ${res.reason}`, true);
@@ -421,6 +436,35 @@ function updateQueuePanel() {
   if (!q.length) { box.innerHTML = ''; return; }
   box.innerHTML = '<b>Fahrstraßenspeicher:</b> ' + q.map(x =>
     `${escapeHtml(pointLabel(x.start))} → ${escapeHtml(pointLabel(x.dest))}`).join(', ');
+}
+
+/** eingestellte Fahrstraßen mit ihrem Zustand */
+function updateRouteList() {
+  const box = $('#route-list');
+  const rs = app.sim.routes;
+  if (!rs.length) { box.innerHTML = '<em>keine Fahrstraße eingestellt</em>'; return; }
+  box.innerHTML = '';
+  for (const r of rs) {
+    const why = routeBlockReason(app.sim, r);
+    const div = document.createElement('div');
+    div.className = 'r';
+    const from = r.signal ? r.signal.name : (r.entryName || '?');
+    const zug = r.trainId ? (app.sim.trains.find(t => t.id === r.trainId)?.nr || '') : '';
+    div.innerHTML = `<span><b>${r.id}</b> ${escapeHtml(from)} → ${escapeHtml(r.destName)}` +
+      `${zug ? ' <span class="small">(' + escapeHtml(zug) + ')</span>' : ''}<br>` +
+      (why ? `<span class="why">wartet: ${escapeHtml(why)}</span>`
+        : `<span class="ok">${r.mode === 'shunt' ? 'Sh1 – Rangierfahrt' : r.substitute ? 'Zs1 – Ersatzsignal' : r.diverging ? 'Hp2 – Langsamfahrt' : 'Hp1 – Fahrt frei'}</span>`) +
+      `</span>`;
+    const b = document.createElement('button');
+    b.textContent = '✕'; b.title = 'Fahrstraße auflösen';
+    b.onclick = () => {
+      const busy = r.steps.some(st => app.sim.occupiedCells().has(st.k));
+      if (busy) { releaseRoute(app.sim, r, { delay: true }); app.sim.stats.emergencyReleases++; logMsg(`Hilfsauflösung ${r.id} läuft.`, 'warn'); }
+      else { app.sim.freeTrainAuthority(r); releaseRoute(app.sim, r); logMsg(`${r.id} aufgelöst.`, 'warn'); }
+    };
+    div.append(b);
+    box.append(div);
+  }
 }
 
 function updateFaults() {
@@ -907,6 +951,8 @@ const SETTING_FIELDS = [
   ['overlapM', 'Durchrutschweg (m)', 'num'],
   ['overlapReleaseSec', 'Auflösung Durchrutschweg nach (s)', 'num'],
   ['switchTime', 'Weichenumlaufzeit (s)', 'num'],
+  ['accel', 'Anfahrbeschleunigung (m/s²)', 'num'],
+  ['brake', 'Bremsverzögerung (m/s²)', 'num'],
   ['crossingCloseSec', 'Schließzeit Bahnübergang (s)', 'num'],
   ['releaseDelaySec', 'Wartezeit Hilfsauflösung (s)', 'num'],
   ['minDwell', 'Mindesthaltezeit (s)', 'num'],
@@ -927,9 +973,13 @@ function buildSettings() {
     lab.textContent = label_;
     const inp = document.createElement('input');
     if (type === 'bool') { inp.type = 'checkbox'; inp.checked = st[key_] !== false; }
-    else { inp.type = 'number'; inp.value = st[key_] ?? 0; }
+    else {
+      inp.type = 'number';
+      inp.value = st[key_] ?? 0;
+      if (key_ === 'accel' || key_ === 'brake') inp.step = '0.1';
+    }
     inp.onchange = () => {
-      st[key_] = type === 'bool' ? inp.checked : (+inp.value || 0);
+      st[key_] = type === 'bool' ? inp.checked : (parseFloat(inp.value) || 0);
       app.dirty = type === 'bool' ? app.dirty : true;
     };
     box.append(lab, inp);
@@ -997,6 +1047,7 @@ function showHelp() {
     body.innerHTML = `
       <div class="helpgrid">
         <span class="kbd">Klick</span><span>Signal/Einfahrt wählen: erst Start, dann Ziel → Fahrstraße</span>
+        <span class="kbd">weites Ziel</span><span>Zuglenkung: liegen Signale dazwischen, wird die ganze Kette von Teilfahrstraßen gestellt</span>
         <span class="kbd">Umschalt+Klick</span><span>Ziel mit Ersatzsignal (Zs1) – Vorbeifahrt am gestörten Signal</span>
         <span class="kbd">Rechtsklick</span><span>Kontextmenü: Auflösung, Selbststellbetrieb, Signalsperre, Gleissperrung</span>
         <span class="kbd">Klick auf Weiche</span><span>Weiche umstellen (Umlaufzeit beachten)</span>
@@ -1013,7 +1064,13 @@ function showHelp() {
       <p class="small">Signalbegriffe: Hp0 Halt · Hp1 Fahrt · Hp2 Langsamfahrt (abzweigende Weiche) ·
       Zs1 Ersatzsignal · Sh1 Rangierfahrt · Vr0/Vr1/Vr2 Vorsignal.
       Eine Fahrstraße zeigt erst Fahrt, wenn alle Weichen in Endlage liegen, der Flankenschutz steht,
-      der Durchrutschweg frei ist und die Bahnübergänge geschlossen sind.</p>`;
+      der Durchrutschweg frei ist und die Bahnübergänge geschlossen sind. Das Feld
+      „Fahrstraße" zeigt zu jeder eingestellten Fahrstraße, worauf sie noch wartet.</p>
+      <p class="small"><b>Damit Züge nicht unnötig bremsen:</b> Fahrstraßen im Voraus stellen –
+      der Durchrutschweg der vorherigen Fahrstraße wird dabei automatisch überlagert.
+      Ein Zug, der erst am Einfahrsignal eine Weiterfahrt bekommt, verliert durch Bremsen und
+      Anfahren rund eine Minute. Anfahrbeschleunigung und Bremsverzögerung lassen sich unter
+      „Einstellungen" ändern, das Tempo des Betriebs oben rechts (bis 120×).</p>`;
     return null;
   });
 }

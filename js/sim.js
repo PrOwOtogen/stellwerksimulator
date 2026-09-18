@@ -15,8 +15,8 @@ import {
 } from './interlocking.js';
 
 export const CELL_M = 100;        // eine Rasterzelle entspricht 100 m
-const ACCEL = 0.7;                // m/s²
-const BRAKE = 0.9;                // m/s²
+const ACCEL_DEFAULT = 0.7;        // m/s²
+const BRAKE_DEFAULT = 0.9;        // m/s²
 
 export const hhmmss = t => {
   t = Math.floor(((t % 86400) + 86400) % 86400);
@@ -429,6 +429,8 @@ export class Sim {
     const obstacle = this.obstaclePos(tr);
     if (obstacle !== null && obstacle < stopAt) stopAt = obstacle;
 
+    const ACCEL = this.cfg.accel || ACCEL_DEFAULT;
+    const BRAKE = this.cfg.brake || BRAKE_DEFAULT;
     const dRest = stopAt - tr.s;
     const vLimit = this.speedLimitFor(tr);
     let vTarget = vLimit / 3.6;
@@ -830,6 +832,14 @@ export class Sim {
     const L = this.layout;
     const locked = new Map(this.lockedCells);
     for (const k of extraLocked) locked.set(k, 'PLAN');
+    // Durchrutschweg der Fahrstraße vor dem Startsignal wird überlagert
+    if (start.type === 'signal') {
+      for (const r of this.routes) {
+        if (r.overlapReleased || !r.dest || r.dest.type !== 'signal') continue;
+        if (r.dest.sig.id !== start.sig.id) continue;
+        for (const st of r.overlap) if (locked.get(st.k) === r.id) locked.delete(st.k);
+      }
+    }
     const ctx = {
       layout: L, blocked: this.blockedCells, locked, holds: this.holdMap(),
       occupied: this.occupiedCells(tr), allowOccupied: false, mode: 'train'

@@ -83,3 +83,9 @@ td input{width:100%;min-width:60px}
 .stop-editor table{margin-bottom:6px}
 .kbd{background:#0f141b;border:1px solid var(--line);border-radius:3px;padding:0 4px;font:11px Consolas,monospace}
 .helpgrid{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px}
+
+.route-list{margin-top:6px;font-size:11px}
+.route-list .r{display:flex;justify-content:space-between;gap:6px;align-items:center;padding:3px 4px;border-bottom:1px solid #222a35}
+.route-list .r .why{color:var(--warn)}
+.route-list .r .ok{color:var(--ok)}
+.route-list .r button{padding:1px 6px}

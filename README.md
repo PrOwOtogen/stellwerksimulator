@@ -25,6 +25,14 @@ und den Zustand jeder Fahrstraße.
 
 * Start (Signal oder Einfahrt) anklicken, dann das Ziel (Signal, Ausfahrt oder – beim
   Rangieren – ein Gleis). Während der Auswahl wird der Fahrweg als Vorschau angezeigt.
+* **Zuglenkung:** Liegen Signale zwischen Start und Ziel, wird automatisch die ganze
+  Kette der Teilfahrstraßen eingestellt – ein Klick von der Einfahrt bis zur Ausfahrt
+  genügt. Was sich nicht stellen lässt, wird gemeldet und kann in den
+  Fahrstraßenspeicher wandern.
+* Fahrstraßen lassen sich **im Voraus** stellen, lange bevor der Zug da ist; der
+  Durchrutschweg der vorherigen Fahrstraße wird dabei überlagert und aufgelöst.
+  Das Feld „Fahrstraße" listet alle eingestellten Fahrstraßen mit ihrem Zustand
+  (Fahrt frei, Weichen laufen, Bahnübergang noch offen …).
 * Eine Fahrstraße zeigt erst Fahrt, wenn **alle Weichen in Endlage** liegen
   (Umlaufzeit), der **Flankenschutz** hergestellt ist, der **Durchrutschweg** frei ist
   und die **Bahnübergänge geschlossen** sind.

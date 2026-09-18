@@ -43,6 +43,8 @@ export function defaultSettings() {
     punctualLimit: 300,      // Grenze für „pünktlich"
     releaseDelaySec: 90,     // Wartezeit bei der Hilfsauflösung
     crossingCloseSec: 25,    // Schließzeit eines Bahnübergangs
+    accel: 0.7,              // Anfahrbeschleunigung in m/s²
+    brake: 0.9,              // Bremsverzögerung in m/s²
     shuntSpeed: 25,          // Rangiergeschwindigkeit
     divergingSpeed: 40,      // Geschwindigkeit über abzweigende Weichen (Hp2)
     substituteSpeed: 40,     // Fahrt auf Ersatzsignal (Zs1)

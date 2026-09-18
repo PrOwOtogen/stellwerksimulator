@@ -66,6 +66,7 @@ export function findRoute(start, dest, ctx) {
   const blocksUs = sig => {
     if (!sig) return false;
     if (sig.kind === 'distant') return false;             // Vorsignale halten nicht
+    if (ctx.passSignals) return false;                    // Kettensuche: Signale überfahrbar
     if (mode === 'train' && sig.kind === 'shunt') return false;  // Sperrsignal gilt nur beim Rangieren
     return true;
   };
@@ -245,8 +246,19 @@ export function lockRoute(sim, start, dest, opts = {}) {
   if (startSig && startSig.kind === 'distant')
     return { ok: false, reason: `${startSig.name} ist ein Vorsignal und kennt keine Fahrstraße.` };
 
+  /* Eine Anschlussfahrstraße überlagert den Durchrutschweg der Fahrstraße,
+     die vor demselben Signal endet – dieser wird dadurch aufgelöst. */
+  const prevRoutes = startSig
+    ? sim.routes.filter(r => !r.overlapReleased && r.overlap.length &&
+      r.dest && r.dest.type === 'signal' && r.dest.sig.id === startSig.id)
+    : [];
+  const locked = prevRoutes.length ? new Map(sim.lockedCells) : sim.lockedCells;
+  for (const r of prevRoutes) {
+    for (const st of r.overlap) if (locked.get(st.k) === r.id) locked.delete(st.k);
+  }
+
   const ctx = {
-    layout: L, blocked: sim.blockedCells, locked: sim.lockedCells, holds: sim.holdMap(),
+    layout: L, blocked: sim.blockedCells, locked, holds: sim.holdMap(),
     occupied: sim.occupiedCells(), allowOccupied: false, mode
   };
   const res = findRoute(start, dest, ctx);
@@ -319,6 +331,11 @@ export function lockRoute(sim, start, dest, opts = {}) {
     setAt: sim.time
   };
 
+  for (const r of prevRoutes) {
+    releaseOverlap(sim, r);
+    sim.log?.(`Durchrutschweg der Fahrstraße ${r.id} durch Anschlussfahrstraße aufgelöst.`);
+  }
+
   // Weichen laufen lassen (Umlaufzeit)
   for (const s of [...res.switches, ...flanks]) {
     const p = parseKey(s.k);
@@ -360,6 +377,31 @@ export function routeReady(sim, route) {
     if (!bü || bü.state !== 'closed') return false;
   }
   return true;
+}
+
+/**
+ * Warum zeigt eine eingestellte Fahrstraße noch keinen Fahrtbegriff?
+ * Liefert null, wenn alles hergestellt ist.
+ */
+export function routeBlockReason(sim, route) {
+  const moving = [...route.switches, ...route.flanks].filter(s => sim.switchMoves.has(s.k));
+  if (moving.length) return `Weichen laufen um (${moving.map(m => m.k).join(', ')})`;
+  for (const s of [...route.switches, ...route.flanks]) {
+    const stillLocked = sim.lockedCells.get(s.k) === route.id ||
+      (s.forStep && sim.lockedCells.get(s.forStep) === route.id);
+    if (!stillLocked && route.passed) continue;
+    const p = parseKey(s.k);
+    const c = cellAt(sim.layout, p.x, p.y);
+    if ((c.sw | 0) !== s.state) return `Weiche ${s.k} nicht in Endlage`;
+  }
+  for (const name of route.crossings || []) {
+    const bü = sim.crossingState.get(name);
+    if (!bü) continue;
+    if (bü.fault) return `${name} ist gestört`;
+    if (bü.state === 'closing') return `${name} schließt`;
+    if (bü.state !== 'closed') return `${name} muss geschlossen werden`;
+  }
+  return null;
 }
 
 /** Fahrstraße auflösen; mit { delay:true } als Hilfsauflösung mit Wartezeit */
@@ -548,4 +590,54 @@ export function pathToSignal(sim, fromKey, fromEnd, sig, maxCells = 15) {
     k = nk; from = opp(to);
   }
   return null;
+}
+
+
+/* ===================================================================
+ * Zuglenkung: eine Folge von Fahrstraßen bis zum entfernten Ziel
+ * ================================================================= */
+
+/**
+ * Zerlegt den Weg zum Ziel an den dazwischenliegenden Hauptsignalen und
+ * stellt die Teilfahrstraßen nacheinander ein.
+ * Ergebnis: { ok, routes, reason, gestellt, gesamt }
+ */
+export function lockRouteChain(sim, start, dest, opts = {}) {
+  const L = sim.layout;
+  const mode = opts.shunt ? 'shunt' : 'train';
+  const ctx = {
+    layout: L, blocked: sim.blockedCells, locked: new Map(), holds: new Map(),
+    occupied: new Set(), allowOccupied: true, mode, passSignals: true
+  };
+  const path = findRoute(start, dest, ctx);
+  if (!path) return { ok: false, reason: 'Es gibt keinen Fahrweg zu diesem Ziel.', routes: [] };
+
+  // Schnittpunkte an Hauptsignalen bestimmen
+  const legs = [];
+  let current = start;
+  path.steps.forEach((st, i) => {
+    if (i === path.steps.length - 1 || st.to == null) return;
+    const p = parseKey(st.k);
+    const sig = signalAt(L, p.x, p.y, st.to);
+    if (!sig) return;
+    if (sig.kind === 'distant') return;
+    if (mode === 'train' && sig.kind === 'shunt') return;
+    legs.push({ from: current, to: { type: 'signal', sig } });
+    current = { type: 'signal', sig };
+  });
+  legs.push({ from: current, to: dest });
+
+  const routes = [];
+  for (const leg of legs) {
+    const res = lockRoute(sim, leg.from, leg.to, opts);
+    if (!res.ok) {
+      return {
+        ok: routes.length > 0, routes, gestellt: routes.length, gesamt: legs.length,
+        reason: res.reason, needsSubstitute: res.needsSubstitute,
+        restStart: leg.from, restDest: dest
+      };
+    }
+    routes.push(res.route);
+  }
+  return { ok: true, routes, gestellt: routes.length, gesamt: legs.length };
 }
