@@ -11,8 +11,10 @@ import {
 } from './model.js';
 import {
   lockRoute, lockRouteChain, releaseRoute, releaseOverlap, findRoute, reachAfterStep,
-  routeReady, aspectOf, aspectSpeed, nextMainSignal, pathToSignal, resetRouteCounter
+  routeReady, aspectOf, aspectSpeed, nextMainSignal, pathToSignal, resetRouteCounter,
+  workingPossible, canReachPlatform
 } from './interlocking.js';
+import { platforms as allPlatforms } from './model.js';
 
 /** Länge einer Rasterzelle in Metern (über die Einstellungen änderbar) */
 export let CELL_M = 100;
@@ -43,7 +45,16 @@ export class Sim {
   constructor(layout, log = () => {}) {
     this.layout = layout;
     this.log = log;
+    this.listeners = [];
     this.reset();
+  }
+
+  /** Beobachter für Betriebsereignisse (Punkte, Signaltöne, Tutorial) */
+  on(fn) { this.listeners.push(fn); return () => { this.listeners = this.listeners.filter(f => f !== fn); }; }
+  emit(type, data = {}) {
+    for (const fn of this.listeners) {
+      try { fn(type, data); } catch (e) { console.error(e); }
+    }
   }
 
   get cfg() { return this.layout.settings || {}; }
@@ -72,6 +83,9 @@ export class Sim {
     this.interlockingFault = null;   // Stellwerksstörung bis Zeitpunkt
     this.autoRoute = false;
     this.occupancyLog = [];           // Gleisbelegung für die Auswertung
+    this.plannedActive = new Map();   // laufende Baustellen: id -> { blocked:Set, pending:Set }
+    this.slowCells = new Map();       // Langsamfahrstellen: Zelle -> km/h
+    this.plannedSpeedLimit = null;    // Langsamfahrt im ganzen Bereich (Baustelle)
     this.stats = {
       finished: 0, punctual: 0, delaySum: 0, routesSet: 0, maxDelay: 0,
       cancelled: 0, signalStops: 0, emergencyReleases: 0, shuntMoves: 0, faultsTotal: 0
@@ -107,6 +121,8 @@ export class Sim {
     this.updateSwitches();
     this.updateCrossings();
     this.updateRoutes();
+    this.updatePlanned();
+    this.checkBlockedPlatforms();
     for (const tr of this.trains) this.updateTrain(tr, dt);
     this.updateQueue();
     if (this.autoRoute) this.autoDispatch();
@@ -328,6 +344,112 @@ export class Sim {
     tr.exiting = false;
   }
 
+  /* ================= Geplante Baustellen ================= */
+  /** Zellen eines benannten Gleises (Bahnsteig oder Abstellgleis) */
+  cellsOfTrack(name) {
+    return Object.values(this.layout.cells)
+      .filter(c => c.platform === name || c.stump === name)
+      .map(c => key(c.x, c.y));
+  }
+
+  updatePlanned() {
+    const list = this.layout.planned || [];
+    for (const p of list) {
+      const active = this.time >= p.from && this.time < p.to;
+      const st = this.plannedActive.get(p.id);
+      if (active && !st) {
+        const state = { blocked: new Set(), pending: new Set() };
+        this.plannedActive.set(p.id, state);
+        if (p.type === 'sperrung') {
+          for (const k of this.cellsOfTrack(p.target)) state.pending.add(k);
+          this.log(`Baustelle beginnt: ${p.target} gesperrt bis ${hhmm(p.to)}.`, 'warn');
+          this.addMessage(`Geplante Gleissperrung ${p.target} beginnt (bis ${hhmm(p.to)}).`, { from: 'Bauleitung', kind: 'info' });
+        } else if (p.type === 'langsam') {
+          if (!p.target || p.target === '*') this.plannedSpeedLimit = p.vmax || 40;
+          else for (const k of this.cellsOfTrack(p.target)) this.slowCells.set(k, p.vmax || 40);
+          this.log(`Langsamfahrstelle ${p.target && p.target !== '*' ? p.target : 'im ganzen Bereich'}: ${p.vmax || 40} km/h bis ${hhmm(p.to)}.`, 'warn');
+        }
+        this.emit('planned', { p, active: true });
+      }
+      if (active && st && st.pending.size) {
+        // Sperrung erst setzen, wenn der Abschnitt frei ist
+        const occ = this.occupiedCells();
+        for (const k of [...st.pending]) {
+          if (occ.has(k) || this.lockedCells.has(k)) continue;
+          this.blockedCells.add(k);
+          st.blocked.add(k);
+          st.pending.delete(k);
+        }
+      }
+      if (!active && st) {
+        for (const k of st.blocked) this.blockedCells.delete(k);
+        if (p.type === 'langsam') {
+          if (!p.target || p.target === '*') this.plannedSpeedLimit = null;
+          else for (const k of this.cellsOfTrack(p.target)) this.slowCells.delete(k);
+        }
+        this.plannedActive.delete(p.id);
+        this.log(`Baustelle beendet: ${p.target && p.target !== '*' ? p.target : 'Langsamfahrt'} wieder frei.`, 'ok');
+        this.emit('planned', { p, active: false });
+      }
+    }
+  }
+
+  /* ================= Gleiswechsel ================= */
+  /** Ist ein Bahnsteiggleis gesperrt (Baustelle oder vollständig gesperrt)? */
+  platformBlocked(name) {
+    for (const p of this.layout.planned || []) {
+      if (p.type === 'sperrung' && p.target === name && this.plannedActive.has(p.id)) return true;
+    }
+    const cells = this.cellsOfTrack(name);
+    return cells.length > 0 && cells.every(k => this.blockedCells.has(k));
+  }
+
+  /** Bahnsteige, an denen der Zug stattdessen halten könnte */
+  alternativePlatforms(tr) {
+    const L = this.layout;
+    const stop = tr.stops[tr.nextStop];
+    if (!stop) return [];
+    const a = entryByName(L, tr.entryName)?.cell;
+    const b = entryByName(L, tr.turn ? tr.turn.exit : tr.exitName)?.cell;
+    return allPlatforms(L).filter(pf => {
+      if (pf === stop.platform || this.platformBlocked(pf)) return false;
+      if (!a || !b) return true;
+      if (tr.turn) return canReachPlatform(L, a, pf) && canReachPlatform(L, b, pf);
+      return workingPossible(L, a, pf, b);
+    });
+  }
+
+  changePlatform(tr, platform) {
+    const st = tr.stops[tr.nextStop];
+    if (!st || st.platform === platform) return false;
+    const alt = st.platform;
+    st.changedFrom = st.changedFrom || alt;
+    st.platform = platform;
+    tr.platformWarned = false;
+    this.log(`${tr.nr}: Gleiswechsel ${alt} → ${platform}.`, 'warn');
+    this.emit('platformChange', { tr, from: alt, to: platform });
+    return true;
+  }
+
+  /** Züge, deren nächster Halt auf einem gesperrten Gleis liegt, melden */
+  checkBlockedPlatforms() {
+    if (this.time - (this._lastPlatformCheck || 0) < 20) return;
+    this._lastPlatformCheck = this.time;
+    for (const tr of this.trains) {
+      if (tr.state === 'done' || tr.state === 'dwell') continue;
+      const stop = tr.stops[tr.nextStop];
+      if (!stop || !this.platformBlocked(stop.platform)) continue;
+      const alt = this.alternativePlatforms(tr);
+      if (this.autoRoute && alt.length) { this.changePlatform(tr, alt[0]); continue; }
+      if (tr.platformWarned) continue;
+      tr.platformWarned = true;
+      this.addMessage(`${tr.nr}: ${stop.platform} ist gesperrt – Gleiswechsel erforderlich.`, {
+        from: 'Reisendeninformation', kind: 'call', data: { trainId: tr.id },
+        actions: alt.slice(0, 4).map(pf => ({ key: 'platform:' + pf, label: 'nach ' + pf }))
+      });
+    }
+  }
+
   /* ================= Meldungen / Zugfunk ================= */
   addMessage(text, opts = {}) {
     const m = {
@@ -336,7 +458,8 @@ export class Sim {
       actions: opts.actions || [], data: opts.data || {}, answered: false
     };
     this.messages.unshift(m);
-    while (this.messages.length > 60) this.messages.pop();
+    while (this.messages.length > 80) this.messages.pop();
+    this.emit('message', m);
     return m;
   }
   answerMessage(id, actionKey) {
@@ -344,8 +467,24 @@ export class Sim {
     if (!m || m.answered) return;
     m.answered = true;
     m.answer = actionKey;
+    m.answeredAt = this.time;
     const tr = m.data.trainId ? this.trains.find(t => t.id === m.data.trainId) : null;
+    this.emit('answered', { m, action: actionKey });
+    if (actionKey.startsWith('platform:')) {
+      if (tr) this.changePlatform(tr, actionKey.slice(9));
+      return;
+    }
     switch (actionKey) {
+      case 'accept':
+        if (tr) { tr.accepted = true; this.log(`${tr.nr} angenommen.`, 'ok'); }
+        break;
+      case 'later':
+        if (tr) {
+          tr.offered = false;
+          tr.offerAgainAt = this.time + 120;
+          this.log(`${tr.nr}: Annahme vorerst abgelehnt, erneutes Anbieten in 2 min.`, 'warn');
+        }
+        break;
       case 'zs1': {
         const sig = m.data.signalId ? this.layout.signals[m.data.signalId] : null;
         if (!sig) break;
@@ -397,6 +536,22 @@ export class Sim {
     if (tr.state === 'done') return;
 
     if (tr.state === 'pending') {
+      // Zugmeldeverfahren: der Nachbar bietet den Zug an, der Fdl nimmt ihn an
+      if (this.cfg.trainReporting && !tr.accepted && tr.kind !== 'rangier') {
+        if (this.autoRoute) tr.accepted = true;
+        else {
+          const lead = this.cfg.offerLeadSec ?? 180;
+          if (!tr.offered && this.time >= tr.plannedEntry - lead && this.time >= (tr.offerAgainAt || 0)) {
+            tr.offered = true;
+            this.addMessage(`Nachbarstellwerk bietet ${tr.nr} (${tr.gattung}) an – Einfahrt ${tr.entryName}, planmäßig ${hhmm(tr.plannedEntry)}.`, {
+              from: 'Zugmeldung', kind: 'offer', data: { trainId: tr.id },
+              actions: [{ key: 'accept', label: 'Annehmen' }, { key: 'later', label: 'Später' }]
+            });
+          }
+          if (this.time > tr.plannedEntry) tr.delay = this.time - tr.plannedEntry;
+          return;
+        }
+      }
       if (this.time >= tr.plannedEntry) {
         tr.state = 'waiting';
         this.log(`${tr.nr} wartet auf Einfahrt in ${tr.entryName}.`, 'warn');
@@ -471,6 +626,7 @@ export class Sim {
         tr.state = 'hold';
         tr.holdSince = this.time;
         this.stats.signalStops++;
+        this.emit('signalStop', { tr, signal: this.signalAtAuthorityEnd(tr) });
       }
       tr.waitSignal = this.signalAtAuthorityEnd(tr);
       tr.standingSince = tr.standingSince ?? this.time;
@@ -568,6 +724,7 @@ export class Sim {
   speedLimitFor(tr) {
     let v = tr.vmax;
     if (this.globalSpeedLimit) v = Math.min(v, this.globalSpeedLimit);
+    if (this.plannedSpeedLimit) v = Math.min(v, this.plannedSpeedLimit);
     if (tr.vmaxFault) v = Math.min(v, tr.vmaxFault);
     if (tr.kind === 'rangier') v = Math.min(v, this.cfg.shuntSpeed ?? 25);
     const i = Math.min(tr.steps.length - 1, Math.max(0, Math.floor(tr.s / CELL_M)));
@@ -575,6 +732,8 @@ export class Sim {
       const p = parseKey(tr.steps[j].k);
       const c = cellAt(this.layout, p.x, p.y);
       if (c && c.vmax) v = Math.min(v, c.vmax);
+      const slow = this.slowCells.get(tr.steps[j].k);
+      if (slow) v = Math.min(v, slow);
     }
     const r = tr.stepRoutes[i];
     if (r) {
@@ -606,6 +765,7 @@ export class Sim {
     this.occupancyLog.push({ platform: st.platform, nr: tr.nr, from: this.time, to: null, planFrom: st.arr, planTo: st.dep });
     this.log(`${tr.nr} hält in ${st.platform} (${signedMin(arrDelay)}), Abfahrt ${hhmm(tr.departAt)}.`,
       arrDelay > 300 ? 'bad' : arrDelay > 60 ? 'warn' : 'ok');
+    this.emit('arrive', { tr, stop: st, delay: arrDelay });
     this.checkConnections(tr, st);
   }
 
@@ -652,6 +812,7 @@ export class Sim {
     const occ = this.occupancyLog.find(o => o.nr === tr.nr && o.platform === st.platform && o.to === null);
     if (occ) occ.to = this.time;
     this.log(`${tr.nr} fährt in ${st.platform} ab (${signedMin(tr.delay)}).`, tr.delay > 180 ? 'warn' : 'ok');
+    this.emit('depart', { tr, stop: st, delay: tr.delay });
     tr.nextStop++;
     // Wende nach dem letzten Halt?
     if (tr.nextStop >= tr.stops.length && tr.turn && !tr.turned) return this.startTurn(tr);
@@ -697,6 +858,7 @@ export class Sim {
     tr.exiting = false;
     tr.record.turnedAt = this.time;
     this.log(`${tr.nr} steht zur Abfahrt bereit (Wende abgeschlossen).`, 'ok');
+    this.emit('turned', { tr });
   }
 
   finishTrain(tr) {
@@ -714,6 +876,7 @@ export class Sim {
     if (tr.delay < (this.cfg.punctualLimit ?? 300)) this.stats.punctual++;
     this.log(`${tr.nr} hat das Stellwerk über ${tr.exitName} verlassen (${signedMin(tr.delay)}).`,
       tr.delay < 300 ? 'ok' : 'warn');
+    this.emit('finish', { tr, delay: tr.delay, auto: this.autoRoute });
   }
 
   /* ================= Fahrstraßen an Züge binden ================= */
@@ -733,6 +896,7 @@ export class Sim {
       tr.record.entryAt = this.time;
       tr.delay = this.time - tr.plannedEntry;
       this.log(`${tr.nr} fährt aus ${tr.entryName} ein (${signedMin(tr.delay)}).`, 'ok');
+      this.emit('enter', { tr, delay: tr.delay });
       return;
     }
     const sig = this.signalAtAuthorityEnd(tr);
@@ -938,6 +1102,25 @@ export class Sim {
     return null;
   }
 
+  /* ================= Zeitsprung ================= */
+  /** Zeitpunkt, bis zu dem sich ohne Eingriff nichts Wesentliches ändert */
+  nextInterestingTime() {
+    if (this.trains.some(t => t.state === 'run' && t.v > 0.5)) return null;
+    const cands = [];
+    for (const t of this.trains) {
+      if (t.state === 'pending') {
+        const lead = this.cfg.trainReporting && !t.accepted ? (this.cfg.offerLeadSec ?? 180) : 0;
+        cands.push(t.plannedEntry - lead);
+      }
+      if (t.state === 'dwell') cands.push(t.departAt);
+      if (t.state === 'turning') cands.push(t.turnReadyAt);
+    }
+    for (const f of this.faults) if (f.repairUntil) cands.push(f.repairUntil);
+    for (const p of this.layout.planned || []) { cands.push(p.from); cands.push(p.to); }
+    const next = cands.filter(t => t > this.time + 5).sort((a, b) => a - b)[0];
+    return next ? next - 15 : null;
+  }
+
   /* ================= Auswertung ================= */
   report() {
     const rows = this.trains.map(t => ({
@@ -995,7 +1178,8 @@ export class Sim {
         vmaxFault: t.vmaxFault, departAt: t.departAt, steps: t.steps,
         stepRouteIds: t.stepRoutes.map(r => (r ? r.id : null)),
         routeStart: [...t.routeStart.entries()], record: t.record, turn: t.turn,
-        turned: t.turned, turnReadyAt: t.turnReadyAt, plan: t.plan
+        turned: t.turned, turnReadyAt: t.turnReadyAt, plan: t.plan,
+        accepted: t.accepted, offered: t.offered, trackLog: t.trackLog
       }))
     };
   }

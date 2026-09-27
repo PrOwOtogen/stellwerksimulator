@@ -328,6 +328,7 @@ export class EventEngine {
     };
     this.sim.faults.push(fault);
     this.sim.stats.faultsTotal++;
+    this.sim.emit('fault', fault);
     this.log(`⚠ ${fault.title}: ${fault.text}`, 'bad');
     this.sim.addMessage(`${fault.title}: ${fault.text}`, {
       from: 'Störungsmeldung', kind: 'fault', data: { faultId: fault.id },
@@ -341,12 +342,14 @@ export class EventEngine {
     if (!fault.repairSec || fault.repairing) return;
     fault.repairing = true;
     fault.repairUntil = this.sim.time + fault.repairSec;
+    this.sim.emit('repairStarted', fault);
     this.log(`Entstörungsdienst für „${fault.title}" angefordert, fertig ca. ${hhmm(fault.repairUntil)}.`, 'warn');
   }
 
   clearFault(fault, why = 'behoben') {
     if (fault.typeDef?.clear) fault.typeDef.clear(this.sim, fault);
     this.sim.faults = this.sim.faults.filter(f => f !== fault);
+    this.sim.emit('faultCleared', { fault, why });
     this.log(`✔ ${fault.title} ${why}.`, 'ok');
   }
 }

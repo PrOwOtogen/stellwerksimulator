@@ -4,7 +4,7 @@
 import {
   DIRS, DIR_NAMES, key, parseKey, cellAt, ensureCell, connect, removeCell,
   inBounds, cellType, signalsOfCell, nextSignalId, platforms, sidings, newSignal,
-  SIGNAL_KINDS, switchGeom, opp
+  SIGNAL_KINDS, switchGeom, opp, neighbor, signalAt, entries, platformCells, entryByName
 } from './model.js';
 import { clearReachCache } from './interlocking.js';
 import { cellSizeOf } from './render.js';
@@ -22,7 +22,8 @@ export const TOOL_HELP = {
   dkw: 'Klick auf eine Kreuzung mit vier Gleisenden: in eine Doppelkreuzungsweiche umwandeln und zurück.',
   speed: 'Klick oder Ziehen: zulässige Geschwindigkeit setzen (leer = keine Beschränkung).',
   label: 'Klick: Beschriftung setzen (leerer Text löscht sie).',
-  select: 'Elemente ansehen und bearbeiten: Klick auf Signal, Weiche, Bahnsteig oder Bahnübergang.'
+  select: 'Elemente ansehen und bearbeiten: Klick auf Signal, Weiche, Bahnsteig oder Bahnübergang.',
+  area: 'Rechteck aufziehen, dann Strg+C kopieren, Strg+X ausschneiden, Strg+V an der Mausposition einfügen, Entf löschen, Pfeiltasten verschieben.'
 };
 
 /** vorgefertigte Gleisbausteine */
@@ -124,9 +125,16 @@ export class Editor {
   }
 
   onDown(e) {
+    if (e.button !== 0) return;
     const L = this.getLayout();
     const p = this.cellFromEvent(e);
     if (!inBounds(L, p.x, p.y)) return;
+    if (this.tool === 'area') {
+      this.selection = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+      this.drag = { last: p, area: true };
+      this.hooks.selection?.(this.selection);
+      return;
+    }
     this.snapshot();
     this.drag = { last: p, shift: e.shiftKey, alt: e.altKey };
     this.apply(p, e, true);
@@ -137,6 +145,12 @@ export class Editor {
     const p = this.cellFromEvent(e);
     this.hover = inBounds(L, p.x, p.y) ? p : null;
     if (!this.drag) { this.onChange(false); return; }
+    if (this.drag.area) {
+      this.selection.x2 = Math.max(0, Math.min(L.gridW - 1, p.x));
+      this.selection.y2 = Math.max(0, Math.min(L.gridH - 1, p.y));
+      this.hooks.selection?.(this.selection);
+      return;
+    }
     if (p.x === this.drag.last.x && p.y === this.drag.last.y) return;
     for (const step of cellPath(this.drag.last, p)) {
       if (!inBounds(L, step.x, step.y)) continue;
@@ -302,6 +316,174 @@ export class Editor {
     clearReachCache(L);
     this.onChange(true);
     return true;
+  }
+
+  /* ---------- Bereichsauswahl und Zwischenablage ---------- */
+  normSel() {
+    const s = this.selection;
+    if (!s) return null;
+    return { x0: Math.min(s.x1, s.x2), y0: Math.min(s.y1, s.y2), x1: Math.max(s.x1, s.x2), y1: Math.max(s.y1, s.y2) };
+  }
+  inSel(x, y, s = this.normSel()) { return s && x >= s.x0 && x <= s.x1 && y >= s.y0 && y <= s.y1; }
+
+  copySelection() {
+    const s = this.normSel();
+    if (!s) return 0;
+    const L = this.getLayout();
+    const cells = [];
+    for (let y = s.y0; y <= s.y1; y++) for (let x = s.x0; x <= s.x1; x++) {
+      const c = cellAt(L, x, y);
+      if (c) cells.push(JSON.parse(JSON.stringify({ ...c, x: x - s.x0, y: y - s.y0 })));
+    }
+    const signals = Object.values(L.signals).filter(sg => this.inSel(sg.x, sg.y, s))
+      .map(sg => ({ ...sg, x: sg.x - s.x0, y: sg.y - s.y0 }));
+    const labels = (L.labels || []).filter(l => this.inSel(l.x, l.y, s)).map(l => ({ ...l, x: l.x - s.x0, y: l.y - s.y0 }));
+    this.clipboard = { w: s.x1 - s.x0 + 1, h: s.y1 - s.y0 + 1, cells, signals, labels };
+    return cells.length;
+  }
+
+  deleteSelection(snap = true) {
+    const s = this.normSel();
+    if (!s) return;
+    const L = this.getLayout();
+    if (snap) this.snapshot();
+    for (let y = s.y0; y <= s.y1; y++) for (let x = s.x0; x <= s.x1; x++) removeCell(L, x, y);
+    L.labels = (L.labels || []).filter(l => !this.inSel(l.x, l.y, s));
+    clearReachCache(L);
+    this.onChange(true);
+  }
+
+  cutSelection() { const n = this.copySelection(); this.deleteSelection(); return n; }
+
+  paste(x, y, snap = true) {
+    const cb = this.clipboard;
+    if (!cb) return false;
+    const L = this.getLayout();
+    if (snap) this.snapshot();
+    const inside = new Set(cb.cells.map(c => key(c.x, c.y)));
+    const placed = [];
+    for (const c of cb.cells) {
+      const nx = x + c.x, ny = y + c.y;
+      if (!inBounds(L, nx, ny)) continue;
+      const t = ensureCell(L, nx, ny);
+      for (const d of c.ends) {
+        const rel = neighbor(c.x, c.y, d);
+        const n = neighbor(nx, ny, d);
+        const nc = cellAt(L, n.x, n.y);
+        if (inside.has(key(rel.x, rel.y)) || (nc && nc.ends.length)) connect(L, nx, ny, d);
+      }
+      placed.push([t, c]);
+    }
+    for (const [t, c] of placed) {
+      t.platform = c.platform; t.stump = c.stump; t.vmax = c.vmax; t.km = c.km;
+      t.dkw = !!c.dkw; t.sw = c.sw | 0;
+      t.crossing = c.crossing ? { ...c.crossing } : null;
+      if (c.entry) t.entry = entryByName(L, c.entry) && entryByName(L, c.entry).cell !== t ? c.entry + ' 2' : c.entry;
+    }
+    const used = new Set(Object.values(L.signals).map(s => s.name));
+    for (const sg of cb.signals) {
+      const nx = x + sg.x, ny = y + sg.y;
+      if (!cellAt(L, nx, ny)) continue;
+      const neu = newSignal(L, nx, ny, sg.dir, sg.kind);
+      neu.name = used.has(sg.name) ? nextSignalId(L, sg.kind) : sg.name;
+      neu.overlap = sg.overlap; neu.selfSet = sg.selfSet;
+      used.add(neu.name);
+      L.signals[neu.id] = neu;
+    }
+    L.labels = L.labels || [];
+    for (const l of cb.labels) L.labels.push({ ...l, x: x + l.x, y: y + l.y });
+    this.selection = { x1: x, y1: y, x2: x + cb.w - 1, y2: y + cb.h - 1 };
+    this.hooks.selection?.(this.selection);
+    clearReachCache(L);
+    this.onChange(true);
+    return true;
+  }
+
+  moveSelection(dx, dy) {
+    const s = this.normSel();
+    if (!s) return;
+    const saved = this.clipboard;
+    this.copySelection();
+    this.snapshot();
+    this.deleteSelection(false);
+    this.paste(s.x0 + dx, s.y0 + dy, false);
+    this.clipboard = saved;
+  }
+
+  /* ---------- Signale automatisch setzen ---------- */
+  autoSignals() {
+    const L = this.getLayout();
+    this.snapshot();
+    let n = 0;
+    const hasMain = (x, y, d) => {
+      const sg = signalAt(L, x, y, d);
+      return sg && sg.kind !== 'distant';
+    };
+    const place = (x, y, d, kind, name) => {
+      if (signalAt(L, x, y, d)) return false;
+      const s = newSignal(L, x, y, d, kind);
+      if (name && !Object.values(L.signals).some(o => o.name === name)) s.name = name;
+      L.signals[s.id] = s;
+      n++;
+      return true;
+    };
+
+    // 1) Bahnsteiggleise: Ausfahrsignale an beiden Enden jedes zusammenhängenden Abschnitts
+    let pfNr = 0;
+    for (const pf of platforms(L)) {
+      pfNr++;
+      const nr = (pf.match(/\d+/) || [String(pfNr)])[0];
+      const set = new Set(platformCells(L, pf).map(c => key(c.x, c.y)));
+      for (const k of set) {
+        const p = parseKey(k);
+        const c = cellAt(L, p.x, p.y);
+        if (c.ends.length === 1) continue;                   // Prellbock
+        for (const d of c.ends) {
+          const nb = neighbor(p.x, p.y, d);
+          if (set.has(key(nb.x, nb.y))) continue;            // weiter im Bahnsteig
+          if (!cellAt(L, nb.x, nb.y)) continue;
+          // schon ein Signal in diese Richtung am Bahnsteigende oder direkt dahinter?
+          if (hasMain(p.x, p.y, d) || hasMain(nb.x, nb.y, d)) continue;
+          const east = [7, 0, 1].includes(d) || (d === 2 && false);
+          place(p.x, p.y, d, 'combined', (east ? 'N' : 'P') + nr);
+        }
+      }
+    }
+
+    // 2) Einfahrten: Einfahrsignal vor der ersten Weiche, Vorsignal davor
+    const letters = 'ABCDEFGHJKLMRTUVWXYZ';
+    let li = 0;
+    const nextLetter = () => {
+      while (li < letters.length && Object.values(L.signals).some(s => s.name === letters[li])) li++;
+      return letters[li++] || null;
+    };
+    for (const e of entries(L)) {
+      const c0 = e.cell;
+      if (c0.ends.length !== 1) continue;
+      let x = c0.x, y = c0.y, d = c0.ends[0];
+      const path = [];
+      let stop = false;
+      for (let i = 0; i < 20 && !stop; i++) {
+        const nb = neighbor(x, y, d);
+        const nc = cellAt(L, nb.x, nb.y);
+        if (!nc || !nc.ends.includes(opp(d))) break;
+        if (nc.ends.length !== 2 || nc.platform) break;      // Weiche, Kreuzung oder Bahnsteig
+        const out = nc.ends.find(v => v !== opp(d));
+        if (hasMain(nb.x, nb.y, out)) { stop = true; path.length = 0; break; }
+        path.push({ x: nb.x, y: nb.y, d: out });
+        x = nb.x; y = nb.y; d = out;
+      }
+      if (path.length < 3) continue;
+      const main = path[path.length - 1];
+      const name = nextLetter();
+      if (!place(main.x, main.y, main.d, 'main', name)) continue;
+      const vIdx = path.length - 1 - Math.min(5, path.length - 2);
+      const vr = path[vIdx];
+      if (vr && vIdx >= 1) place(vr.x, vr.y, vr.d, 'distant', name ? 'Vr ' + name : null);
+    }
+    clearReachCache(L);
+    this.onChange(true);
+    return n;
   }
 
   describe() {

@@ -14,7 +14,7 @@ const COL = {
   platform: '#243043', platformEdge: '#3a4a63', siding: '#2a2438',
   text: '#c3cedb', entry: '#4da3ff', moving: '#e3b341'
 };
-const TRAIN_COLORS = {
+export const TRAIN_COLORS = {
   ICE: '#e8e8e8', IC: '#dcdcdc', RE: '#4da3ff', RB: '#3fb950', S: '#63d3a6',
   Güterzug: '#e3b341', Nahgüterzug: '#c79a3a', Sonderzug: '#ff9f43', Lok: '#b28cff'
 };
@@ -79,6 +79,7 @@ export function draw(canvas, L, sim, opts = {}) {
   if (sim) for (const r of sim.routes) if (!r.overlapReleased) for (const st of r.overlap || []) overlapKeys.add(st.k);
 
   for (const k in L.cells) drawCell(ctx, L, L.cells[k], cs, sim, occupied, overlapKeys, set);
+  if (sim && sim.slowCells && sim.slowCells.size) drawSlowCells(ctx, sim, cs);
   drawCrossings(ctx, L, cs, sim);
   if (sim) for (const tr of sim.trains) drawTrain(ctx, tr, cs, set);
   for (const id in L.signals) drawSignal(ctx, L, L.signals[id], cs, sim);
@@ -96,6 +97,34 @@ export function draw(canvas, L, sim, opts = {}) {
       ctx.fillStyle = 'rgba(77,163,255,.25)';
       ctx.fillRect(p.x * cs, p.y * cs, cs, cs);
     }
+  }
+  if (opts.selection) {
+    const r = opts.selection;
+    const x0 = Math.min(r.x1, r.x2), y0 = Math.min(r.y1, r.y2);
+    const x1 = Math.max(r.x1, r.x2), y1 = Math.max(r.y1, r.y2);
+    ctx.fillStyle = 'rgba(77,163,255,.12)';
+    ctx.fillRect(x0 * cs, y0 * cs, (x1 - x0 + 1) * cs, (y1 - y0 + 1) * cs);
+    ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+    ctx.strokeRect(x0 * cs + .5, y0 * cs + .5, (x1 - x0 + 1) * cs, (y1 - y0 + 1) * cs);
+    ctx.setLineDash([]);
+  }
+  if (opts.pulse && opts.pulse.length) {
+    const t = (performance.now() % 1200) / 1200;
+    for (const p of opts.pulse) {
+      const c = centerOf(p.x, p.y, cs);
+      ctx.strokeStyle = `rgba(255,196,64,${1 - t})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(c.px, c.py, cs * (0.5 + t * 0.9), 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = '#ffc440'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(c.px, c.py, cs * 0.55, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  if (opts.hoverSignal) {
+    const s = opts.hoverSignal, d = DIRS[s.dir];
+    const c = centerOf(s.x, s.y, cs);
+    const ox = c.px + d.dx * cs * 0.40 - d.dy * cs * 0.30, oy = c.py + d.dy * cs * 0.40 + d.dx * cs * 0.30;
+    ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(ox, oy, cs * 0.3, 0, Math.PI * 2); ctx.stroke();
   }
   if (opts.preview) {
     ctx.strokeStyle = 'rgba(127,216,255,.7)'; ctx.lineWidth = Math.max(2, cs * 0.16);
@@ -325,8 +354,18 @@ function drawTrain(ctx, tr, cs, set) {
     i === 0 ? ctx.moveTo(p.px, p.py) : ctx.lineTo(p.px, p.py);
   }
   ctx.stroke();
-  ctx.fillStyle = '#08121f';
-  ctx.beginPath(); ctx.arc(head.px, head.py, Math.max(2, cs * 0.1), 0, Math.PI * 2); ctx.fill();
+  // Spitze als Pfeil in Fahrtrichtung
+  const back = pointAlong(tr.steps, Math.max(0, tr.s - Math.min(tr.lenM, 30)), cs);
+  let ang = Math.atan2(head.py - back.py, head.px - back.px);
+  if (!isFinite(ang) || (head.px === back.px && head.py === back.py)) ang = 0;
+  const r = Math.max(4, cs * 0.26);
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  ctx.moveTo(head.px + Math.cos(ang) * r, head.py + Math.sin(ang) * r);
+  ctx.lineTo(head.px + Math.cos(ang + 2.4) * r, head.py + Math.sin(ang + 2.4) * r);
+  ctx.lineTo(head.px + Math.cos(ang - 2.4) * r, head.py + Math.sin(ang - 2.4) * r);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#08121f'; ctx.lineWidth = 1; ctx.stroke();
   tr._label = { px: (head.px + tail.px) / 2, py: Math.min(head.py, tail.py) };
 }
 
@@ -366,3 +405,46 @@ export const LEGEND = [
   ['#7fd8ff', 'Durchrutschweg'], ['#c957d6', 'gesperrt/gestört'],
   ['#e8e8e8', 'Rangierfahrt (Sh1)']
 ];
+
+
+/** Langsamfahrstellen (Baustellen) gelb gepunktet unterlegen */
+function drawSlowCells(ctx, sim, cs) {
+  ctx.strokeStyle = '#e3b341'; ctx.lineWidth = 2; ctx.setLineDash([2, 3]);
+  for (const k of sim.slowCells.keys()) {
+    const p = parseKey(k);
+    ctx.strokeRect(p.x * cs + 2, p.y * cs + cs * 0.2, cs - 4, cs * 0.6);
+  }
+  ctx.setLineDash([]);
+}
+
+/** Übersichtskarte mit Ausschnittsrahmen */
+export function drawMinimap(canvas, L, sim, view) {
+  const W = canvas.clientWidth || 220, H = canvas.clientHeight || 120;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(7,10,15,.92)'; ctx.fillRect(0, 0, W, H);
+  const sc = Math.min(W / L.gridW, H / L.gridH);
+  const occ = sim ? sim.occupiedCells() : new Set();
+  ctx.lineWidth = Math.max(1, sc * 0.35);
+  for (const k in L.cells) {
+    const c = L.cells[k];
+    if (!c.ends.length) continue;
+    const col = occ.has(k) ? '#f85149' : sim && sim.lockedCells.has(k) ? '#f0f4f8' : c.platform ? '#6c7f99' : '#4b5666';
+    ctx.strokeStyle = col;
+    const cx = (c.x + 0.5) * sc, cy = (c.y + 0.5) * sc;
+    ctx.beginPath();
+    for (const d of c.ends) { ctx.moveTo(cx, cy); ctx.lineTo(cx + DIRS[d].dx * sc / 2, cy + DIRS[d].dy * sc / 2); }
+    ctx.stroke();
+  }
+  if (view) {
+    const x0 = Math.max(0, view.x0), y0 = Math.max(0, view.y0);
+    const x1 = Math.min(L.gridW, view.x1), y1 = Math.min(L.gridH, view.y1);
+    const ganz = x0 <= 0 && y0 <= 0 && x1 >= L.gridW && y1 >= L.gridH;
+    if (!ganz) {
+      ctx.fillStyle = 'rgba(77,163,255,.08)';
+      ctx.fillRect(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+      ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(x0 * sc + .5, y0 * sc + .5, (x1 - x0) * sc - 1, (y1 - y0) * sc - 1);
+    }
+  }
+}
